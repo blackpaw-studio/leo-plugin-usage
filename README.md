@@ -18,10 +18,10 @@ When you add a Claude account, macOS asks once to let Leo read that account's Ke
 
 ## Install
 
-[Install in Leo](leo://plugin/install?url=https%3A%2F%2Fgithub.com%2Fblackpaw-studio%2Fleo-plugin-usage&ref=v0.1.1)
+[Install in Leo](leo://plugin/install?url=https%3A%2F%2Fgithub.com%2Fblackpaw-studio%2Fleo-plugin-usage&ref=v0.2.0)
 
 ```
-leo://plugin/install?url=https%3A%2F%2Fgithub.com%2Fblackpaw-studio%2Fleo-plugin-usage&ref=v0.1.1
+leo://plugin/install?url=https%3A%2F%2Fgithub.com%2Fblackpaw-studio%2Fleo-plugin-usage&ref=v0.2.0
 ```
 
 ## Development
