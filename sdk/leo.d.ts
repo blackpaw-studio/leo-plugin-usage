@@ -1,3 +1,5 @@
+// NOTE: the credential handle's optional `machine` (remote accounts) is ahead of the vendored leoterm commit below;
+// the plugin's local copy lives in src/api.ts. Re-vendor once leoterm's feat/remote-plugin-credentials lands.
 // Vendored from blackpaw-studio/leoterm@8a1fc50b9 plugins/sdk/leo.d.ts — do not edit; re-vendor
 // Leo plugin SDK types, API version 1. Mirrors LeoKit's Plugins module
 // (LeoPluginNode, LeoPluginAction, LeoPluginBridge, the JS prelude) one to one.

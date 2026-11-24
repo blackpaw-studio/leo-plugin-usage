@@ -63,6 +63,7 @@ async function fetchOutcome(leo: LeoV2, handle: Handle, nowMs: number): Promise<
   } catch (e) {
     const message = errorMessage(e);
     if (message.includes("credentialNeedsAuthorization")) return { kind: "needsAuthorization" };
+    if (message.includes("credentialMachineUnavailable")) return { kind: "offline" };
     return isThrottle(message) ? { kind: "throttled", retryAfterMs: throttleDelayMs(message) } : { kind: "failed", message };
   }
 }

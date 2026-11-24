@@ -89,6 +89,7 @@
 
   // src/state.ts
   var RATE_LIMITED = "Rate limited";
+  var OFFLINE = "Machine offline";
   var NO_DATA = "No usage data";
   var initialState = () => ({ status: "loading", windows: [] });
   var degrade = (state, message, extra = {}) => state.windows.length > 0 ? { ...state, ...extra, status: "stale", message } : { windows: [], ...extra, status: "error", message };
@@ -109,6 +110,8 @@
       }
       case "throttled":
         return degrade(settled, RATE_LIMITED, { nextAttemptAtMs: nowMs + outcome.retryAfterMs });
+      case "offline":
+        return degrade(settled, OFFLINE, failure);
       case "failed":
         return degrade(settled, outcome.message, failure);
     }
@@ -211,6 +214,7 @@
     } catch (e) {
       const message = errorMessage(e);
       if (message.includes("credentialNeedsAuthorization")) return { kind: "needsAuthorization" };
+      if (message.includes("credentialMachineUnavailable")) return { kind: "offline" };
       return isThrottle(message) ? { kind: "throttled", retryAfterMs: throttleDelayMs(message) } : { kind: "failed", message };
     }
   }
@@ -388,7 +392,6 @@
   };
   var KIND_SYMBOL = { "claude-code": "bubble.left.fill", codex: "terminal" };
   var KIND_NAME = { "claude-code": "Claude Code", codex: "Codex" };
-  var KIND_COMMAND = { "claude-code": "claude", codex: "codex" };
   var HEADER_SYMBOL = "speedometer";
   var callback = (id, title, sfSymbol, payload) => ({
     type: "callback",
@@ -434,17 +437,20 @@
     }
   };
   var retryDetail = (state) => state.message === RATE_LIMITED && state.nextAttemptAtMs !== void 0 ? RATE_LIMITED + " \xB7 retrying at " + clockTime(state.nextAttemptAtMs) : void 0;
+  var isOffline = (state) => state.message === OFFLINE;
+  var machineName = (handle) => handle.machine ?? "This machine";
+  var expiredText = ({ handle }) => "Token expired \u2014 use this account in " + KIND_NAME[handle.kind] + (handle.machine !== void 0 ? " (on " + handle.machine + ")" : "") + " to renew";
   var stateText = (account) => {
     const { handle, state } = account;
     switch (state.status) {
       case "loading":
         return "Loading\u2026";
       case "expired":
-        return "Signed out \u2014 run " + KIND_COMMAND[handle.kind] + " with this account to refresh";
+        return expiredText(account);
       case "needsAuthorization":
         return handle.kind === "claude-code" ? "Leo needs Keychain access to read this account" : "Leo needs access to read this account";
       case "error":
-        return retryDetail(state) ?? clip(state.message ?? NO_DATA, MAX_LINE_CHARS);
+        return retryDetail(state) ?? (isOffline(state) ? machineName(handle) + " is offline" : clip(state.message ?? NO_DATA, MAX_LINE_CHARS));
       default:
         return void 0;
     }
@@ -463,7 +469,13 @@
         return [];
     }
   };
-  var staleDetail = (state) => state.status !== "stale" ? void 0 : retryDetail(state) ?? (state.updatedAtMs !== void 0 ? "Couldn't refresh \xB7 values from " + clockTime(state.updatedAtMs) : void 0);
+  var staleDetail = ({ handle, state }) => {
+    if (state.status !== "stale") return void 0;
+    if (retryDetail(state) !== void 0) return retryDetail(state);
+    if (state.updatedAtMs === void 0) return void 0;
+    const lead = isOffline(state) ? machineName(handle) + " is offline" : "Couldn't refresh";
+    return clip(lead + " \xB7 values from " + clockTime(state.updatedAtMs), MAX_LINE_CHARS);
+  };
   var renameForm = (account) => ({
     type: "Form",
     id: CALLBACKS.rename,
@@ -492,7 +504,7 @@
   };
   var sidebarGroup = (account, nowMs) => {
     const top = highestWindow(account.state.windows);
-    const children = top ? [meter(top, nowMs, staleDetail(account.state))] : [];
+    const children = top ? [meter(top, nowMs, staleDetail(account))] : [];
     const text = children.length === 0 ? stateText(account) : void 0;
     const kind = KIND_NAME[account.handle.kind];
     const subtitle = clip(text === void 0 ? kind : kind + " \xB7 " + text, MAX_LINE_CHARS);
@@ -501,8 +513,9 @@
   var fullGroup = (account, nowMs) => {
     const { state, handle } = account;
     const updated = state.updatedAtMs !== void 0 && state.windows.length > 0 ? updatedAgo(state.updatedAtMs, nowMs) : stateText(account);
-    const subtitle = clip(updated === void 0 ? handle.path : handle.path + " \xB7 " + updated, MAX_LINE_CHARS);
-    const detail = staleDetail(state);
+    const where = handle.machine !== void 0 ? handle.machine + " \xB7 " + handle.path : handle.path;
+    const subtitle = clip(updated === void 0 ? where : where + " \xB7 " + updated, MAX_LINE_CHARS);
+    const detail = staleDetail(account);
     return group(
       account,
       state.windows.map((w) => meter(w, nowMs, detail)),

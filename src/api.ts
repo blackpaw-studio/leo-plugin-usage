@@ -12,9 +12,16 @@ export interface Handle {
   kind: CredentialKind;
   label: string;
   path: string;
+  /** Display name of the Leo machine the account lives on. Absent for accounts on this machine. */
+  machine?: string;
 }
 
-export type CredentialFailureReason = "credentialNeedsAuthorization" | "credentialHostMismatch" | "gestureRequired";
+export type CredentialFailureReason =
+  | "credentialNeedsAuthorization"
+  | "credentialHostMismatch"
+  | "credentialMachineUnavailable"
+  | "credentialInvalid"
+  | "gestureRequired";
 
 export type MeterTone = "neutral" | "success" | "warning" | "failure";
 

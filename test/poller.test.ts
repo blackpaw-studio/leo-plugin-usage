@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createPoller, CLAUDE_URL, CODEX_URL, POLL_INTERVAL_SEC } from "../src/poller";
 import type { Handle } from "../src/api";
+import { OFFLINE } from "../src/state";
 import claudeFull from "./fixtures/claude-full.json";
 import codexFull from "./fixtures/codex-full.json";
 import { createStubLeo } from "./stubLeo";
@@ -72,6 +73,21 @@ describe("poller", () => {
     await poller.sync();
     await poller.refresh();
     expect(stateOf(poller, "c1")?.status).toBe(status);
+  });
+
+  it("an unreachable machine is an offline error that backs off for 5 minutes", async () => {
+    const remote: Handle = { ...claude, machine: "Dionysus" };
+    const { stub, poller } = setup([remote]);
+    stub.route("GET", CLAUDE_URL, { reject: "credentialMachineUnavailable: Dionysus is offline" }, { body: claudeFull });
+    await poller.sync();
+    await poller.refresh();
+    expect(stateOf(poller, "c1")).toMatchObject({ status: "error", message: OFFLINE, nextAttemptAtMs: stub.clock.now() + 5 * MIN });
+    stub.clock.advance(5 * MIN - 1_000);
+    await poller.refresh();
+    expect(stub.fetches).toHaveLength(1);
+    stub.clock.advance(1_000);
+    await poller.refresh();
+    expect(stateOf(poller, "c1")?.status).toBe("ok");
   });
 
   it("goes stale, keeping values, when a later fetch fails", async () => {

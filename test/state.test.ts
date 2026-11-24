@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { initialState, isDue, reduce } from "../src/state";
+import { FAILURE_BACKOFF_MS } from "../src/retry";
+import { OFFLINE, initialState, isDue, reduce } from "../src/state";
 import type { UsageWindow } from "../src/window";
 
 const NOW = 1_000_000;
@@ -36,6 +37,20 @@ describe("account state reducer", () => {
   it("401 is expired and drops values", () => {
     const good = reduce(initialState(), { kind: "ok", windows: w }, NOW);
     expect(reduce(good, { kind: "unauthorized" }, NOW)).toMatchObject({ status: "expired", windows: [] });
+  });
+
+  it("an offline machine goes stale with values, backing off like other failures", () => {
+    const good = reduce(initialState(), { kind: "ok", windows: w }, NOW);
+    expect(reduce(good, { kind: "offline" }, NOW + 5)).toMatchObject({
+      status: "stale",
+      windows: w,
+      message: OFFLINE,
+      nextAttemptAtMs: NOW + 5 + FAILURE_BACKOFF_MS,
+    });
+  });
+
+  it("an offline machine with nothing to show is an error", () => {
+    expect(reduce(initialState(), { kind: "offline" }, NOW)).toMatchObject({ status: "error", message: OFFLINE });
   });
 
   it("credentialNeedsAuthorization is needsAuthorization", () => {

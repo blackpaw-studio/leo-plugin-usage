@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fullRoot, sidebarRoot } from "../src/views";
 import type { Account } from "../src/poller";
+import { OFFLINE } from "../src/state";
 import type { GroupNode, MeterNode } from "../src/api";
 import type { Accessory } from "../sdk/leo";
 
@@ -70,7 +71,7 @@ describe("sidebarRoot", () => {
   it("an expired account says how to sign in again and leads with Copy Sign-in Command", () => {
     const [g] = groups(sidebarRoot([account({ state: { status: "expired", windows: [] } })], NOW));
     expect(g.accessory).toMatchObject({ text: "Expired", color: "failure" });
-    expect(g.subtitle).toBe("Claude Code · Signed out — run claude with this account to refresh");
+    expect(g.subtitle).toBe("Claude Code · Token expired — use this account in Claude Code to renew");
     expect(g.actions?.[0]).toMatchObject({ type: "copy", title: "Copy Sign-in Command", text: "CLAUDE_CONFIG_DIR=~/.claude-work claude" });
   });
 
@@ -157,5 +158,57 @@ describe("host limits on raw error text", () => {
         }
       });
     }
+  });
+});
+
+describe("remote accounts", () => {
+  const remote = (over: Partial<Omit<Account, "state">> & { state?: Partial<Account["state"]> } = {}, kind: "claude-code" | "codex" = "claude-code") =>
+    account({ handle: { id: "r1", kind, label: ".claude", path: "~/.claude", machine: "Dionysus" }, ...over });
+
+  it("full subtitle leads with the machine", () => {
+    expect(groups(fullRoot([remote()], NOW))[0].subtitle).toBe("Dionysus · ~/.claude · Updated 3m ago");
+  });
+
+  it("an offline account with values reads '<machine> is offline · values from …'", () => {
+    const state = { status: "stale", message: OFFLINE, windows: [session] } as const;
+    const [g] = groups(sidebarRoot([remote({ state })], NOW));
+    expect(meters(g)[0].detail).toMatch(/^Dionysus is offline · values from /);
+  });
+
+  it("an offline account without values says the machine is offline", () => {
+    const state = { status: "error", message: OFFLINE, windows: [] } as const;
+    const [g] = groups(fullRoot([remote({ state })], NOW));
+    expect(g.subtitle).toBe("Dionysus · ~/.claude · Dionysus is offline");
+  });
+
+  it("expired remote copy names the machine and tool, and keeps the sign-in command", () => {
+    const state = { status: "expired", windows: [] } as const;
+    const [g] = groups(sidebarRoot([remote({ state })], NOW));
+    expect(g.subtitle).toBe("Claude Code · Token expired — use this account in Claude Code (on Dionysus) to renew");
+    expect(g.actions?.[0]).toMatchObject({ type: "copy", title: "Copy Sign-in Command" });
+  });
+
+  it("expired Codex copy says Codex", () => {
+    const state = { status: "expired", windows: [] } as const;
+    const [g] = groups(sidebarRoot([remote({ state }, "codex")], NOW));
+    expect(g.subtitle).toBe("Codex · Token expired — use this account in Codex (on Dionysus) to renew");
+  });
+
+  it("each remote copy string fits the 80-char help limit", () => {
+    for (const s of ["Token expired — use this account in Claude Code (on Dionysus) to renew", "Dionysus is offline · values from 12:00 PM"]) {
+      expect(s.length).toBeLessThanOrEqual(80);
+    }
+  });
+
+  it("expired local copy drops the machine", () => {
+    const state = { status: "expired", windows: [] } as const;
+    const [g] = groups(sidebarRoot([account({ state })], NOW));
+    expect(g.subtitle).toBe("Claude Code · Token expired — use this account in Claude Code to renew");
+  });
+
+  it("clips long machine names to the host line limit", () => {
+    const state = { status: "error", message: OFFLINE, windows: [] } as const;
+    const long = remote({ state, handle: { id: "r", kind: "claude-code", label: "x", path: "~/.claude", machine: "M".repeat(120) } });
+    for (const root of [fullRoot([long], NOW), sidebarRoot([long], NOW)]) expect(groups(root)[0].subtitle!.length).toBeLessThanOrEqual(120);
   });
 });

@@ -21,11 +21,13 @@ export type Outcome =
   | { kind: "ok"; windows: readonly UsageWindow[] }
   | { kind: "unauthorized" }
   | { kind: "needsAuthorization" }
+  | { kind: "offline" }
   | { kind: "rateLimited"; retryAfterMs?: number }
   | { kind: "throttled"; retryAfterMs: number }
   | { kind: "failed"; message: string };
 
 export const RATE_LIMITED = "Rate limited";
+export const OFFLINE = "Machine offline";
 export const NO_DATA = "No usage data";
 
 export const initialState = (): AccountState => ({ status: "loading", windows: [] });
@@ -55,6 +57,8 @@ export function reduce(state: AccountState, outcome: Outcome, nowMs: number): Ac
     }
     case "throttled":
       return degrade(settled, RATE_LIMITED, { nextAttemptAtMs: nowMs + outcome.retryAfterMs });
+    case "offline":
+      return degrade(settled, OFFLINE, failure);
     case "failed":
       return degrade(settled, outcome.message, failure);
   }

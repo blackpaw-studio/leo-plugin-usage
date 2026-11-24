@@ -2,7 +2,7 @@ import type { Accessory, AccessoryColor, Action, Form } from "../sdk/leo";
 import type { CredentialKind, GroupNode, MeterNode, MeterTone, UsageNode, UsageRoot } from "./api";
 import { MAX_HELP_CHARS, MAX_LINE_CHARS, clip, clockTime, percentText, resetsIn, updatedAgo } from "./format";
 import type { Account } from "./poller";
-import { NO_DATA, RATE_LIMITED, type AccountState } from "./state";
+import { NO_DATA, OFFLINE, RATE_LIMITED, type AccountState } from "./state";
 import { highestWindow, toneFor, worstTone } from "./tone";
 import type { UsageWindow } from "./window";
 
@@ -77,19 +77,29 @@ const stateAccessory = (state: AccountState): Accessory | undefined => {
 const retryDetail = (state: AccountState): string | undefined =>
   state.message === RATE_LIMITED && state.nextAttemptAtMs !== undefined ? RATE_LIMITED + " · retrying at " + clockTime(state.nextAttemptAtMs) : undefined;
 
+const isOffline = (state: AccountState): boolean => state.message === OFFLINE;
+
+const machineName = (handle: Account["handle"]): string => handle.machine ?? "This machine";
+
+const expiredText = ({ handle }: Account): string =>
+  "Token expired — use this account in " +
+  KIND_NAME[handle.kind] +
+  (handle.machine !== undefined ? " (on " + handle.machine + ")" : "") +
+  " to renew";
+
 const stateText = (account: Account): string | undefined => {
   const { handle, state } = account;
   switch (state.status) {
     case "loading":
       return "Loading…";
     case "expired":
-      return "Signed out — run " + KIND_COMMAND[handle.kind] + " with this account to refresh";
+      return expiredText(account);
     case "needsAuthorization":
       return handle.kind === "claude-code"
         ? "Leo needs Keychain access to read this account"
         : "Leo needs access to read this account";
     case "error":
-      return retryDetail(state) ?? clip(state.message ?? NO_DATA, MAX_LINE_CHARS);
+      return retryDetail(state) ?? (isOffline(state) ? machineName(handle) + " is offline" : clip(state.message ?? NO_DATA, MAX_LINE_CHARS));
     default:
       return undefined;
   }
@@ -112,10 +122,13 @@ const leadingActions = (account: Account): Action[] => {
   }
 };
 
-const staleDetail = (state: AccountState): string | undefined =>
-  state.status !== "stale"
-    ? undefined
-    : retryDetail(state) ?? (state.updatedAtMs !== undefined ? "Couldn't refresh · values from " + clockTime(state.updatedAtMs) : undefined);
+const staleDetail = ({ handle, state }: Account): string | undefined => {
+  if (state.status !== "stale") return undefined;
+  if (retryDetail(state) !== undefined) return retryDetail(state);
+  if (state.updatedAtMs === undefined) return undefined;
+  const lead = isOffline(state) ? machineName(handle) + " is offline" : "Couldn't refresh";
+  return clip(lead + " · values from " + clockTime(state.updatedAtMs), MAX_LINE_CHARS);
+};
 
 const renameForm = (account: Account): Form => ({
   type: "Form",
@@ -147,7 +160,7 @@ const group = (account: Account, children: GroupNode["children"], subtitle: stri
 
 const sidebarGroup = (account: Account, nowMs: number): GroupNode => {
   const top = highestWindow(account.state.windows);
-  const children = top ? [meter(top, nowMs, staleDetail(account.state))] : [];
+  const children = top ? [meter(top, nowMs, staleDetail(account))] : [];
   // The kind is always the subtitle (VoiceOver reads title, subtitle, state). The host hides it while a
   // meter shows; without one, the state explanation follows the kind so it isn't lost.
   const text = children.length === 0 ? stateText(account) : undefined;
@@ -159,8 +172,9 @@ const sidebarGroup = (account: Account, nowMs: number): GroupNode => {
 const fullGroup = (account: Account, nowMs: number): GroupNode => {
   const { state, handle } = account;
   const updated = state.updatedAtMs !== undefined && state.windows.length > 0 ? updatedAgo(state.updatedAtMs, nowMs) : stateText(account);
-  const subtitle = clip(updated === undefined ? handle.path : handle.path + " · " + updated, MAX_LINE_CHARS);
-  const detail = staleDetail(state);
+  const where = handle.machine !== undefined ? handle.machine + " · " + handle.path : handle.path;
+  const subtitle = clip(updated === undefined ? where : where + " · " + updated, MAX_LINE_CHARS);
+  const detail = staleDetail(account);
   return group(
     account,
     state.windows.map((w) => meter(w, nowMs, detail)),

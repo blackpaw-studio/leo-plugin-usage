@@ -116,7 +116,7 @@
   {
     "type": "Group",
     "title": "claude-old",
-    "subtitle": "Claude Code · Signed out — run claude with this account to refresh",
+    "subtitle": "Claude Code · Token expired — use this account in Claude Code to renew",
     "sfSymbol": "bubble.left.fill",
     "accessory": {
       "type": "Accessory",
