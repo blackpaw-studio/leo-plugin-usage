@@ -48,32 +48,81 @@
     });
   }
 
+  // src/refresh.ts
+  var FRESH_MS = 4 * 6e4;
+  var MANUAL_FRESH_MS = 6e4;
+  var BYPASS_INTERVAL_MS = 6e4;
+  var union = (a, b) => a || b ? [.../* @__PURE__ */ new Set([...a ?? [], ...b ?? []])] : void 0;
+  var mergeRefresh = (a, b) => {
+    const ids = a.ids && b.ids ? union(a.ids, b.ids) : void 0;
+    const bypassBackoff = union(a.bypassBackoff, b.bypassBackoff);
+    return {
+      ...ids ? { ids } : {},
+      ...a.manual || b.manual ? { manual: true } : {},
+      ...bypassBackoff ? { bypassBackoff } : {}
+    };
+  };
+
+  // src/retry.ts
+  var SEC = 1e3;
+  var MIN = 60 * SEC;
+  var MIN_RETRY_MS = MIN;
+  var MAX_RETRY_MS = 60 * MIN;
+  var DEFAULT_RATE_LIMIT_MS = 5 * MIN;
+  var FAILURE_BACKOFF_MS = 5 * MIN;
+  var THROTTLE_DEFAULT_MS = MIN;
+  var headerValue = (headers, name) => Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
+  function parseRetryAfter(value, nowMs) {
+    const text = value?.trim() ?? "";
+    if (/^\d+$/.test(text)) return Number(text) * SEC;
+    if (!/[A-Za-z]/.test(text)) return void 0;
+    const at = Date.parse(text);
+    return Number.isFinite(at) ? Math.max(0, at - nowMs) : void 0;
+  }
+  var clamp = (ms, min, max) => Math.min(max, Math.max(min, ms));
+  var rateLimitDelayMs = (retryAfterMs, streak) => retryAfterMs !== void 0 ? clamp(retryAfterMs, MIN_RETRY_MS, MAX_RETRY_MS) : Math.min(MAX_RETRY_MS, DEFAULT_RATE_LIMIT_MS * 2 ** Math.max(0, streak - 1));
+  var isThrottle = (message) => /rate limited/i.test(message);
+  var throttleDelayMs = (message) => {
+    const seconds = /retry in (\d+)\s*s/i.exec(message)?.[1];
+    return seconds === void 0 ? THROTTLE_DEFAULT_MS : Math.min(MAX_RETRY_MS, Number(seconds) * SEC);
+  };
+
   // src/state.ts
-  var BACKOFF_MS = 15 * 6e4;
+  var RATE_LIMITED = "Rate limited";
   var NO_DATA = "No usage data";
   var initialState = () => ({ status: "loading", windows: [] });
   var degrade = (state, message, extra = {}) => state.windows.length > 0 ? { ...state, ...extra, status: "stale", message } : { windows: [], ...extra, status: "error", message };
   function reduce(state, outcome, nowMs) {
+    const { nextAttemptAtMs: _wait, rateLimitStreak, ...settled } = state;
+    const failure = { nextAttemptAtMs: nowMs + FAILURE_BACKOFF_MS };
     switch (outcome.kind) {
       case "ok":
-        return outcome.windows.length === 0 ? { status: "error", windows: [], message: NO_DATA } : { status: "ok", windows: outcome.windows, updatedAtMs: nowMs };
+        return outcome.windows.length === 0 ? { status: "error", windows: [], message: NO_DATA, ...failure } : { status: "ok", windows: outcome.windows, updatedAtMs: nowMs };
       case "unauthorized":
-        return { status: "expired", windows: [] };
+        return { status: "expired", windows: [], ...failure };
       case "needsAuthorization":
         return { status: "needsAuthorization", windows: [] };
-      case "rateLimited":
-        return degrade(state, "Rate limited", { backoffUntilMs: nowMs + BACKOFF_MS });
+      case "rateLimited": {
+        const streak = (rateLimitStreak ?? 0) + 1;
+        const wait = rateLimitDelayMs(outcome.retryAfterMs, streak);
+        return degrade(settled, RATE_LIMITED, { nextAttemptAtMs: nowMs + wait, rateLimitStreak: streak });
+      }
+      case "throttled":
+        return degrade(settled, RATE_LIMITED, { nextAttemptAtMs: nowMs + outcome.retryAfterMs });
       case "failed":
-        return degrade(state, outcome.message);
+        return degrade(settled, outcome.message, failure);
     }
   }
-  var isDue = (state, nowMs) => state.backoffUntilMs === void 0 || nowMs >= state.backoffUntilMs;
+  var isDue = (state, nowMs) => state.nextAttemptAtMs === void 0 || nowMs >= state.nextAttemptAtMs;
+  var isFresh = (state, nowMs, maxAgeMs) => state.updatedAtMs !== void 0 && nowMs - state.updatedAtMs < maxAgeMs;
 
   // src/store.ts
   var STATE_KEY = "state";
   var MAX_STATE_CHARS = 15e3;
   var MAX_LABEL_CHARS = 60;
-  var emptyPersisted = () => ({ order: [], labels: {}, snapshots: {} });
+  var MAX_MESSAGE_CHARS = 80;
+  var STORED_STATUSES = /* @__PURE__ */ new Set(["stale", "error", "expired"]);
+  var emptyPersisted = () => ({ order: [], labels: {}, snapshots: {}, nextAttempts: {}, outcomes: {} });
   var WINDOW_KEYS = /* @__PURE__ */ new Set(["session", "weekly", "weekly-opus", "weekly-sonnet"]);
   var readWindow = (v) => {
     if (!isRecord(v) || typeof v.key !== "string" || !WINDOW_KEYS.has(v.key) || typeof v.label !== "string") return [];
@@ -82,6 +131,11 @@
     const resetsAtMs = finiteNumber(v.resetsAtMs);
     const base = { key: v.key, label: v.label, percent };
     return [resetsAtMs === void 0 ? base : { ...base, resetsAtMs }];
+  };
+  var readOutcome = (v) => {
+    if (!isRecord(v) || typeof v.status !== "string" || !STORED_STATUSES.has(v.status)) return [];
+    const status = v.status;
+    return [typeof v.message === "string" ? { status, message: v.message.slice(0, MAX_MESSAGE_CHARS) } : { status }];
   };
   var readSnapshot = (v) => {
     if (!isRecord(v) || !Array.isArray(v.windows)) return [];
@@ -95,7 +149,9 @@
       Object.entries(raw.labels).filter((e) => typeof e[1] === "string").map(([id, label]) => [id, label.slice(0, MAX_LABEL_CHARS)])
     ) : {};
     const snapshots = isRecord(raw.snapshots) ? Object.fromEntries(Object.entries(raw.snapshots).flatMap(([id, s]) => readSnapshot(s).map((snap) => [id, snap]))) : {};
-    return { order, labels, snapshots };
+    const nextAttempts = isRecord(raw.nextAttempts) ? Object.fromEntries(Object.entries(raw.nextAttempts).flatMap(([id, at]) => finiteNumber(at) === void 0 ? [] : [[id, Number(at)]])) : {};
+    const outcomes = isRecord(raw.outcomes) ? Object.fromEntries(Object.entries(raw.outcomes).flatMap(([id, o]) => readOutcome(o).map((out) => [id, out]))) : {};
+    return { order, labels, snapshots, nextAttempts, outcomes };
   }
   async function loadPersisted(leo2) {
     const raw = await leo2.secrets.get(STATE_KEY);
@@ -108,12 +164,23 @@
   }
   function fit(state) {
     const byAge = Object.entries(state.snapshots).sort((a, b) => a[1].updatedAtMs - b[1].updatedAtMs);
-    const trimmed = (dropped) => ({ ...state, snapshots: Object.fromEntries(byAge.slice(dropped)) });
+    const trimmed = (dropped, outcomes) => ({
+      ...state,
+      outcomes,
+      snapshots: Object.fromEntries(byAge.slice(dropped))
+    });
+    const fits = (candidate) => JSON.stringify(candidate).length <= MAX_STATE_CHARS;
     for (let dropped = 0; dropped <= byAge.length; dropped += 1) {
-      const candidate = trimmed(dropped);
-      if (JSON.stringify(candidate).length <= MAX_STATE_CHARS) return candidate;
+      const candidate = trimmed(dropped, state.outcomes);
+      if (fits(candidate)) return candidate;
     }
-    return trimmed(byAge.length);
+    const bare = trimmed(byAge.length, {});
+    const kept = Object.entries(state.outcomes);
+    for (let count = kept.length - 1; count > 0; count -= 1) {
+      const candidate = { ...bare, outcomes: Object.fromEntries(kept.slice(0, count)) };
+      if (fits(candidate)) return candidate;
+    }
+    return bare;
   }
   async function savePersisted(leo2, state) {
     await leo2.secrets.set(STATE_KEY, JSON.stringify(fit(sanitize(state))));
@@ -129,12 +196,12 @@
   };
   var defaultLabel = (handle) => handle.label.startsWith(".") ? handle.label.slice(1) : handle.label;
   var errorMessage = (e) => e instanceof Error ? e.message : String(e);
-  async function fetchOutcome(leo2, handle) {
+  async function fetchOutcome(leo2, handle, nowMs) {
     const provider = PROVIDERS[handle.kind];
     try {
       const res = await leo2.fetch(provider.url, { credential: handle.id, headers: { Accept: "application/json" } });
       if (res.status === 401) return { kind: "unauthorized" };
-      if (res.status === 429) return { kind: "rateLimited" };
+      if (res.status === 429) return { kind: "rateLimited", retryAfterMs: parseRetryAfter(headerValue(res.headers, "retry-after"), nowMs) };
       if (res.status !== 200) return { kind: "failed", message: "HTTP " + res.status };
       try {
         return { kind: "ok", windows: provider.parse(JSON.parse(res.body)) };
@@ -143,13 +210,23 @@
       }
     } catch (e) {
       const message = errorMessage(e);
-      return message.includes("credentialNeedsAuthorization") ? { kind: "needsAuthorization" } : { kind: "failed", message };
+      if (message.includes("credentialNeedsAuthorization")) return { kind: "needsAuthorization" };
+      return isThrottle(message) ? { kind: "throttled", retryAfterMs: throttleDelayMs(message) } : { kind: "failed", message };
     }
   }
+  var storedOutcome = (state) => state.status === "stale" || state.status === "error" || state.status === "expired" ? [state.message === void 0 ? { status: state.status } : { status: state.status, message: state.message }] : [];
+  var restoreOutcome = (state, outcome) => {
+    if (!outcome) return state;
+    const message = outcome.message === void 0 ? {} : { message: outcome.message };
+    if (outcome.status === "expired") return { status: "expired", windows: [], nextAttemptAtMs: state.nextAttemptAtMs };
+    return state.windows.length > 0 ? { ...state, ...message, status: "stale" } : { ...state, ...message, status: "error" };
+  };
   function createPoller(leo2, clock, onChange) {
     let entries = [];
     let persisted = null;
     let inFlight = null;
+    const lastBypassAt = /* @__PURE__ */ new Map();
+    const backedOff = () => entries.filter((e) => e.state.nextAttemptAtMs !== void 0 && e.state.nextAttemptAtMs > clock.now());
     const persist = async () => {
       const base = persisted ?? await loadPersisted(leo2);
       persisted = {
@@ -159,7 +236,9 @@
           entries.flatMap(
             (e) => e.state.windows.length > 0 && e.state.updatedAtMs !== void 0 ? [[e.handle.id, { windows: [...e.state.windows], updatedAtMs: e.state.updatedAtMs }]] : []
           )
-        )
+        ),
+        nextAttempts: Object.fromEntries(backedOff().map((e) => [e.handle.id, e.state.nextAttemptAtMs ?? 0])),
+        outcomes: Object.fromEntries(backedOff().flatMap((e) => storedOutcome(e.state).map((o) => [e.handle.id, o])))
       };
       await savePersisted(leo2, persisted);
     };
@@ -169,7 +248,11 @@
     };
     const restore = (handle, saved) => {
       const snap = saved.snapshots[handle.id];
-      return snap ? { status: "ok", windows: snap.windows, updatedAtMs: snap.updatedAtMs } : initialState();
+      const saidAt = saved.nextAttempts[handle.id];
+      const base = snap ? { status: "ok", windows: snap.windows, updatedAtMs: snap.updatedAtMs } : initialState();
+      if (saidAt === void 0 || saidAt <= clock.now()) return base;
+      const nextAttemptAtMs = Math.min(saidAt, clock.now() + MAX_RETRY_MS);
+      return restoreOutcome({ ...base, nextAttemptAtMs }, saved.outcomes[handle.id]);
     };
     const sync = async () => {
       persisted = persisted ?? await loadPersisted(leo2);
@@ -187,11 +270,19 @@
       if (JSON.stringify(entries.map((e) => e.handle.id)) !== JSON.stringify(saved.order)) await persist();
       onChange();
     };
+    const claimBypass = (id, options) => {
+      if (!options.bypassBackoff?.includes(id)) return false;
+      const last = lastBypassAt.get(id);
+      if (last !== void 0 && clock.now() - last < BYPASS_INTERVAL_MS) return false;
+      lastBypassAt.set(id, clock.now());
+      return true;
+    };
+    const shouldFetch = (state, id, options) => claimBypass(id, options) || isDue(state, clock.now()) && !isFresh(state, clock.now(), options.manual ? MANUAL_FRESH_MS : FRESH_MS);
     const pass = async (options) => {
       for (const { handle } of [...entries]) {
         const current = entries.find((e) => e.handle.id === handle.id);
-        if (!current || !options.force && !isDue(current.state, clock.now())) continue;
-        const outcome = await fetchOutcome(leo2, handle);
+        if (!current || options.ids && !options.ids.includes(handle.id) || !shouldFetch(current.state, handle.id, options)) continue;
+        const outcome = await fetchOutcome(leo2, handle, clock.now());
         if (entries.some((e) => e.handle.id === handle.id)) {
           setState(handle.id, reduce(entries.find((e) => e.handle.id === handle.id)?.state ?? initialState(), outcome, clock.now()));
         }
@@ -209,7 +300,7 @@
     };
     const refresh = (options = {}) => {
       if (inFlight) {
-        queued = { force: (queued?.force ?? false) || options.force === true };
+        queued = queued === null ? options : mergeRefresh(queued, options);
         return inFlight;
       }
       inFlight = run(options).finally(() => {
@@ -250,22 +341,22 @@
   }
 
   // src/format.ts
-  var MIN = 6e4;
-  var HOUR = 60 * MIN;
+  var MIN2 = 6e4;
+  var HOUR = 60 * MIN2;
   var DAY = 24 * HOUR;
   var percentText = (percent) => Math.round(percent) + "%";
   var pair = (big, unit, rest, restUnit) => rest === 0 ? big + unit : big + unit + " " + rest + restUnit;
   var span = (ms) => {
-    if (ms < MIN) return "<1m";
-    if (ms < HOUR) return Math.floor(ms / MIN) + "m";
-    if (ms < DAY) return pair(Math.floor(ms / HOUR), "h", Math.floor(ms % HOUR / MIN), "m");
+    if (ms < MIN2) return "<1m";
+    if (ms < HOUR) return Math.floor(ms / MIN2) + "m";
+    if (ms < DAY) return pair(Math.floor(ms / HOUR), "h", Math.floor(ms % HOUR / MIN2), "m");
     return pair(Math.floor(ms / DAY), "d", Math.floor(ms % DAY / HOUR), "h");
   };
   var resetsIn = (resetsAtMs, nowMs) => resetsAtMs <= nowMs ? "Resetting now" : "Resets in " + span(resetsAtMs - nowMs);
   var updatedAgo = (updatedAtMs, nowMs) => {
     const age = Math.max(0, nowMs - updatedAtMs);
-    if (age < MIN) return "Updated just now";
-    if (age < HOUR) return "Updated " + Math.floor(age / MIN) + "m ago";
+    if (age < MIN2) return "Updated just now";
+    if (age < HOUR) return "Updated " + Math.floor(age / MIN2) + "m ago";
     if (age < DAY) return "Updated " + Math.floor(age / HOUR) + "h ago";
     return "Updated " + Math.floor(age / DAY) + "d ago";
   };
@@ -311,7 +402,7 @@
     callback(CALLBACKS.add, "Add Codex Account\u2026", "plus.circle", { kind: "codex" })
   ];
   var removeAction = (account) => callback(CALLBACKS.remove, "Remove Account", "minus.circle", { id: account.handle.id });
-  var refreshAction = callback(CALLBACKS.refresh, "Refresh", "arrow.clockwise");
+  var refreshAction = (account) => callback(CALLBACKS.refresh, "Refresh", "arrow.clockwise", { id: account.handle.id });
   var accessory = (sfSymbol, text, color) => ({ type: "Accessory", sfSymbol, text, color });
   var emptyState = () => ({
     type: "EmptyState",
@@ -342,6 +433,7 @@
         return void 0;
     }
   };
+  var retryDetail = (state) => state.message === RATE_LIMITED && state.nextAttemptAtMs !== void 0 ? RATE_LIMITED + " \xB7 retrying at " + clockTime(state.nextAttemptAtMs) : void 0;
   var stateText = (account) => {
     const { handle, state } = account;
     switch (state.status) {
@@ -352,7 +444,7 @@
       case "needsAuthorization":
         return handle.kind === "claude-code" ? "Leo needs Keychain access to read this account" : "Leo needs access to read this account";
       case "error":
-        return clip(state.message ?? NO_DATA, MAX_LINE_CHARS);
+        return retryDetail(state) ?? clip(state.message ?? NO_DATA, MAX_LINE_CHARS);
       default:
         return void 0;
     }
@@ -371,7 +463,7 @@
         return [];
     }
   };
-  var staleDetail = (state, nowMs) => state.status === "stale" && state.updatedAtMs !== void 0 ? "Couldn't refresh \xB7 values from " + clockTime(state.updatedAtMs) : void 0;
+  var staleDetail = (state) => state.status !== "stale" ? void 0 : retryDetail(state) ?? (state.updatedAtMs !== void 0 ? "Couldn't refresh \xB7 values from " + clockTime(state.updatedAtMs) : void 0);
   var renameForm = (account) => ({
     type: "Form",
     id: CALLBACKS.rename,
@@ -400,24 +492,24 @@
   };
   var sidebarGroup = (account, nowMs) => {
     const top = highestWindow(account.state.windows);
-    const children = top ? [meter(top, nowMs, staleDetail(account.state, nowMs))] : [];
+    const children = top ? [meter(top, nowMs, staleDetail(account.state))] : [];
     const text = children.length === 0 ? stateText(account) : void 0;
     const kind = KIND_NAME[account.handle.kind];
     const subtitle = clip(text === void 0 ? kind : kind + " \xB7 " + text, MAX_LINE_CHARS);
-    return group(account, children, subtitle, [...leadingActions(account), refreshAction, ...addActions, removeAction(account)]);
+    return group(account, children, subtitle, [...leadingActions(account), refreshAction(account), ...addActions, removeAction(account)]);
   };
   var fullGroup = (account, nowMs) => {
     const { state, handle } = account;
     const updated = state.updatedAtMs !== void 0 && state.windows.length > 0 ? updatedAgo(state.updatedAtMs, nowMs) : stateText(account);
     const subtitle = clip(updated === void 0 ? handle.path : handle.path + " \xB7 " + updated, MAX_LINE_CHARS);
-    const detail = staleDetail(state, nowMs);
+    const detail = staleDetail(state);
     return group(
       account,
       state.windows.map((w) => meter(w, nowMs, detail)),
       subtitle,
       [
         ...leadingActions(account),
-        refreshAction,
+        refreshAction(account),
         { type: "pushView", title: "Rename\u2026", sfSymbol: "tag", node: renameForm(account) },
         callback(CALLBACKS.remove, "Remove", "minus.circle", { id: handle.id })
       ]
@@ -516,12 +608,12 @@
       }
       if (!handle) return;
       await poller.sync();
-      await poller.refresh({ force: true });
+      await poller.refresh({ ids: [handle.id] });
     };
     const authorize = async (id) => {
       const pending = leo2.credentials.authorize(id);
       await pending;
-      await poller.refresh({ force: true });
+      await poller.refresh({ ids: [id] });
     };
     const activate = async (slot) => {
       if (slot?.kind === "section" && slot.id === SECTION_ID) sections.set(JSON.stringify(slot), slot);
@@ -549,8 +641,12 @@
     };
     const refreshNow = async (slot) => {
       await start();
-      await poller.refresh({ force: true });
+      await poller.refresh({ manual: true });
       if (slot?.kind === "palette") leo2.render(slot, note("Usage refreshed", void 0, "checkmark.circle.fill"));
+    };
+    const refreshAccount = async (id) => {
+      await start();
+      await poller.refresh({ ids: [id], manual: true, bypassBackoff: [id] });
     };
     const callbackHandler = (id, payload) => {
       const body = isObj(payload) ? payload : {};
@@ -563,8 +659,10 @@
           const target = str(body.id);
           return target ? authorize(target).then(() => null) : Promise.resolve(null);
         }
-        case CALLBACKS.refresh:
-          return refreshNow().then(() => null);
+        case CALLBACKS.refresh: {
+          const target = str(body.id);
+          return (target ? refreshAccount(target) : refreshNow()).then(() => null);
+        }
         case CALLBACKS.remove: {
           const target = str(body.id);
           return target ? removeAccount(target).then(() => null) : Promise.resolve(null);
