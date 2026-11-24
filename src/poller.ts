@@ -4,9 +4,9 @@ import type { Clock } from "./clock";
 import { parseClaude } from "./parse/claude";
 import { parseCodex } from "./parse/codex";
 import { BYPASS_INTERVAL_MS, FRESH_MS, MANUAL_FRESH_MS, mergeRefresh, type RefreshOptions } from "./refresh";
-import { headerValue, isThrottle, parseRetryAfter, throttleDelayMs } from "./retry";
+import { MAX_RETRY_MS, headerValue, isThrottle, parseRetryAfter, throttleDelayMs } from "./retry";
 import { initialState, isDue, isFresh, reduce, type AccountState, type Outcome } from "./state";
-import { loadPersisted, savePersisted, type Persisted } from "./store";
+import { loadPersisted, savePersisted, type Persisted, type StoredOutcome } from "./store";
 import type { UsageWindow } from "./window";
 
 export const CLAUDE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -69,12 +69,27 @@ async function fetchOutcome(leo: LeoV2, handle: Handle, nowMs: number): Promise<
 
 export type { RefreshOptions };
 
+const storedOutcome = (state: AccountState): StoredOutcome[] =>
+  state.status === "stale" || state.status === "error" || state.status === "expired"
+    ? [state.message === undefined ? { status: state.status } : { status: state.status, message: state.message }]
+    : [];
+
+/** Puts back what the account showed when it was last backed off. Values come from the snapshot, if any. */
+const restoreOutcome = (state: AccountState, outcome: StoredOutcome | undefined): AccountState => {
+  if (!outcome) return state;
+  const message = outcome.message === undefined ? {} : { message: outcome.message };
+  if (outcome.status === "expired") return { status: "expired", windows: [], nextAttemptAtMs: state.nextAttemptAtMs };
+  return state.windows.length > 0 ? { ...state, ...message, status: "stale" } : { ...state, ...message, status: "error" };
+};
+
 export function createPoller(leo: LeoV2, clock: Clock, onChange: () => void): Poller {
   let entries: Array<{ handle: Handle; state: AccountState }> = [];
   let persisted: Persisted | null = null;
   let inFlight: Promise<void> | null = null;
   /** When each account last used its once-a-minute backoff bypass. */
   const lastBypassAt = new Map<string, number>();
+
+  const backedOff = () => entries.filter((e) => e.state.nextAttemptAtMs !== undefined && e.state.nextAttemptAtMs > clock.now());
 
   const persist = async (): Promise<void> => {
     const base = persisted ?? (await loadPersisted(leo));
@@ -88,11 +103,8 @@ export function createPoller(leo: LeoV2, clock: Clock, onChange: () => void): Po
             : [],
         ),
       ),
-      nextAttempts: Object.fromEntries(
-        entries.flatMap((e) =>
-          e.state.nextAttemptAtMs !== undefined && e.state.nextAttemptAtMs > clock.now() ? [[e.handle.id, e.state.nextAttemptAtMs] as const] : [],
-        ),
-      ),
+      nextAttempts: Object.fromEntries(backedOff().map((e) => [e.handle.id, e.state.nextAttemptAtMs ?? 0] as const)),
+      outcomes: Object.fromEntries(backedOff().flatMap((e) => storedOutcome(e.state).map((o) => [e.handle.id, o] as const))),
     };
     await savePersisted(leo, persisted);
   };
@@ -104,9 +116,12 @@ export function createPoller(leo: LeoV2, clock: Clock, onChange: () => void): Po
 
   const restore = (handle: Handle, saved: Persisted): AccountState => {
     const snap = saved.snapshots[handle.id];
-    const nextAttemptAtMs = saved.nextAttempts[handle.id];
+    const saidAt = saved.nextAttempts[handle.id];
     const base: AccountState = snap ? { status: "ok", windows: snap.windows, updatedAtMs: snap.updatedAtMs } : initialState();
-    return nextAttemptAtMs === undefined ? base : { ...base, nextAttemptAtMs };
+    if (saidAt === undefined || saidAt <= clock.now()) return base; // a backoff that already ended restores nothing
+    // A time saved under a skewed clock must not park the account for longer than any real backoff.
+    const nextAttemptAtMs = Math.min(saidAt, clock.now() + MAX_RETRY_MS);
+    return restoreOutcome({ ...base, nextAttemptAtMs }, saved.outcomes[handle.id]);
   };
 
   const sync = async (): Promise<void> => {

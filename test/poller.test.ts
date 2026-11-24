@@ -410,3 +410,73 @@ describe("failure backoff", () => {
     expect(stateOf(poller, "c1")?.status).toBe("ok");
   });
 });
+
+describe("restart recovery of a backed-off account", () => {
+  const relaunch = (ctx: ReturnType<typeof setup>) => {
+    const poller = createPoller(ctx.stub.leo, ctx.stub.clock, () => {});
+    return poller;
+  };
+
+  it("keeps showing a rate limit, with its snapshot, as stale", async () => {
+    const ctx = setup([claude]);
+    ctx.stub.route("GET", CLAUDE_URL, { body: claudeFull }, { status: 429, headers: { "retry-after": "600" } });
+    await ctx.poller.sync();
+    await ctx.poller.refresh();
+    ctx.stub.clock.advance(5 * MIN);
+    await ctx.poller.refresh();
+    const again = relaunch(ctx);
+    await again.start();
+    expect(stateOf(again, "c1")).toMatchObject({ status: "stale", message: "Rate limited", nextAttemptAtMs: ctx.stub.clock.now() + 10 * MIN });
+    expect(stateOf(again, "c1")?.windows).toHaveLength(4);
+    expect(ctx.stub.fetches).toHaveLength(2);
+  });
+
+  it("shows a rate limit with no snapshot as an error, not Loading", async () => {
+    const ctx = setup([claude]);
+    ctx.stub.route("GET", CLAUDE_URL, { status: 429 });
+    await ctx.poller.sync();
+    await ctx.poller.refresh();
+    const again = relaunch(ctx);
+    await again.sync();
+    expect(stateOf(again, "c1")).toMatchObject({ status: "error", message: "Rate limited", windows: [] });
+  });
+
+  it("keeps a signed-out account expired", async () => {
+    const ctx = setup([claude]);
+    ctx.stub.route("GET", CLAUDE_URL, { status: 401 });
+    await ctx.poller.sync();
+    await ctx.poller.refresh();
+    const again = relaunch(ctx);
+    await again.sync();
+    expect(stateOf(again, "c1")).toMatchObject({ status: "expired", windows: [] });
+  });
+
+  it("restores a failure message, and an expired backoff restores as plain ok/loading", async () => {
+    const ctx = setup([claude, codex]);
+    ctx.stub.route("GET", CLAUDE_URL, { status: 500 });
+    ctx.stub.route("GET", CODEX_URL, { body: codexFull });
+    await ctx.poller.sync();
+    await ctx.poller.refresh();
+    const again = relaunch(ctx);
+    await again.sync();
+    expect(stateOf(again, "c1")).toMatchObject({ status: "error", message: "HTTP 500" });
+    expect(stateOf(again, "x1")).toMatchObject({ status: "ok" });
+    ctx.stub.clock.advance(5 * MIN);
+    const later = relaunch(ctx);
+    await later.sync();
+    expect(stateOf(later, "c1")).toMatchObject({ status: "loading" });
+  });
+
+  it("caps a persisted retry time at one hour from now", async () => {
+    const ctx = setup([claude]);
+    ctx.stub.secretStore.set("state", JSON.stringify({ order: ["c1"], nextAttempts: { c1: ctx.stub.clock.now() + 10 * 60 * MIN } }));
+    ctx.stub.route("GET", CLAUDE_URL, { body: claudeFull });
+    await ctx.poller.sync();
+    ctx.stub.clock.advance(60 * MIN - 1);
+    await ctx.poller.refresh();
+    expect(ctx.stub.fetches).toHaveLength(0);
+    ctx.stub.clock.advance(1);
+    await ctx.poller.refresh();
+    expect(ctx.stub.fetches).toHaveLength(1);
+  });
+});
