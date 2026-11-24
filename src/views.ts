@@ -2,7 +2,7 @@ import type { Accessory, AccessoryColor, Action, Form } from "../sdk/leo";
 import type { CredentialKind, GroupNode, MeterNode, MeterTone, UsageNode, UsageRoot } from "./api";
 import { MAX_HELP_CHARS, MAX_LINE_CHARS, clip, clockTime, percentText, resetsIn, updatedAgo } from "./format";
 import type { Account } from "./poller";
-import { NO_DATA, type AccountState } from "./state";
+import { NO_DATA, RATE_LIMITED, type AccountState } from "./state";
 import { highestWindow, toneFor, worstTone } from "./tone";
 import type { UsageWindow } from "./window";
 
@@ -36,7 +36,7 @@ const addActions: Action[] = [
 
 const removeAction = (account: Account): Action => callback(CALLBACKS.remove, "Remove Account", "minus.circle", { id: account.handle.id });
 
-const refreshAction = callback(CALLBACKS.refresh, "Refresh", "arrow.clockwise");
+const refreshAction = (account: Account): Action => callback(CALLBACKS.refresh, "Refresh", "arrow.clockwise", { id: account.handle.id });
 
 const accessory = (sfSymbol: string, text: string, color: AccessoryColor): Accessory => ({ type: "Accessory", sfSymbol, text, color });
 
@@ -73,6 +73,10 @@ const stateAccessory = (state: AccountState): Accessory | undefined => {
   }
 };
 
+/** "Rate limited · retrying at 8:57 PM" while a rate-limit backoff is running. */
+const retryDetail = (state: AccountState): string | undefined =>
+  state.message === RATE_LIMITED && state.nextAttemptAtMs !== undefined ? RATE_LIMITED + " · retrying at " + clockTime(state.nextAttemptAtMs) : undefined;
+
 const stateText = (account: Account): string | undefined => {
   const { handle, state } = account;
   switch (state.status) {
@@ -85,7 +89,7 @@ const stateText = (account: Account): string | undefined => {
         ? "Leo needs Keychain access to read this account"
         : "Leo needs access to read this account";
     case "error":
-      return clip(state.message ?? NO_DATA, MAX_LINE_CHARS);
+      return retryDetail(state) ?? clip(state.message ?? NO_DATA, MAX_LINE_CHARS);
     default:
       return undefined;
   }
@@ -108,10 +112,10 @@ const leadingActions = (account: Account): Action[] => {
   }
 };
 
-const staleDetail = (state: AccountState, nowMs: number): string | undefined =>
-  state.status === "stale" && state.updatedAtMs !== undefined
-    ? "Couldn't refresh · values from " + clockTime(state.updatedAtMs)
-    : undefined;
+const staleDetail = (state: AccountState): string | undefined =>
+  state.status !== "stale"
+    ? undefined
+    : retryDetail(state) ?? (state.updatedAtMs !== undefined ? "Couldn't refresh · values from " + clockTime(state.updatedAtMs) : undefined);
 
 const renameForm = (account: Account): Form => ({
   type: "Form",
@@ -143,27 +147,27 @@ const group = (account: Account, children: GroupNode["children"], subtitle: stri
 
 const sidebarGroup = (account: Account, nowMs: number): GroupNode => {
   const top = highestWindow(account.state.windows);
-  const children = top ? [meter(top, nowMs, staleDetail(account.state, nowMs))] : [];
+  const children = top ? [meter(top, nowMs, staleDetail(account.state))] : [];
   // The kind is always the subtitle (VoiceOver reads title, subtitle, state). The host hides it while a
   // meter shows; without one, the state explanation follows the kind so it isn't lost.
   const text = children.length === 0 ? stateText(account) : undefined;
   const kind = KIND_NAME[account.handle.kind];
   const subtitle = clip(text === undefined ? kind : kind + " · " + text, MAX_LINE_CHARS);
-  return group(account, children, subtitle, [...leadingActions(account), refreshAction, ...addActions, removeAction(account)]);
+  return group(account, children, subtitle, [...leadingActions(account), refreshAction(account), ...addActions, removeAction(account)]);
 };
 
 const fullGroup = (account: Account, nowMs: number): GroupNode => {
   const { state, handle } = account;
   const updated = state.updatedAtMs !== undefined && state.windows.length > 0 ? updatedAgo(state.updatedAtMs, nowMs) : stateText(account);
   const subtitle = clip(updated === undefined ? handle.path : handle.path + " · " + updated, MAX_LINE_CHARS);
-  const detail = staleDetail(state, nowMs);
+  const detail = staleDetail(state);
   return group(
     account,
     state.windows.map((w) => meter(w, nowMs, detail)),
     subtitle,
     [
       ...leadingActions(account),
-      refreshAction,
+      refreshAction(account),
       { type: "pushView", title: "Rename…", sfSymbol: "tag", node: renameForm(account) },
       callback(CALLBACKS.remove, "Remove", "minus.circle", { id: handle.id }),
     ],

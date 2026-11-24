@@ -43,7 +43,10 @@
         "type": "callback",
         "id": "refresh",
         "title": "Refresh",
-        "sfSymbol": "arrow.clockwise"
+        "sfSymbol": "arrow.clockwise",
+        "payload": {
+          "id": "c1"
+        }
       },
       {
         "type": "pushView",
@@ -105,7 +108,10 @@
         "type": "callback",
         "id": "refresh",
         "title": "Refresh",
-        "sfSymbol": "arrow.clockwise"
+        "sfSymbol": "arrow.clockwise",
+        "payload": {
+          "id": "c2"
+        }
       },
       {
         "type": "pushView",
@@ -171,7 +177,10 @@
         "type": "callback",
         "id": "refresh",
         "title": "Refresh",
-        "sfSymbol": "arrow.clockwise"
+        "sfSymbol": "arrow.clockwise",
+        "payload": {
+          "id": "c3"
+        }
       },
       {
         "type": "pushView",
@@ -242,7 +251,10 @@
         "type": "callback",
         "id": "refresh",
         "title": "Refresh",
-        "sfSymbol": "arrow.clockwise"
+        "sfSymbol": "arrow.clockwise",
+        "payload": {
+          "id": "x1"
+        }
       },
       {
         "type": "pushView",

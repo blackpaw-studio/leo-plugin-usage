@@ -57,6 +57,16 @@ describe("sidebarRoot", () => {
     expect(meters(g)[0].detail).toBe("Couldn't refresh · values from 6:57 AM");
   });
 
+  it("a rate-limited account says when it retries, in place of the bare reason", () => {
+    const retry = NOW + 5 * 60_000; // 7:05 AM in the suite's pinned zone
+    const stale = groups(sidebarRoot([account({ state: { status: "stale", message: "Rate limited", nextAttemptAtMs: retry } })], NOW))[0];
+    expect(meters(stale)[0].detail).toBe("Rate limited · retrying at 7:05 AM");
+    const bare = account({ state: { status: "error", windows: [], message: "Rate limited", nextAttemptAtMs: retry } });
+    expect(groups(sidebarRoot([bare], NOW))[0].subtitle).toBe("Claude Code · Rate limited · retrying at 7:05 AM");
+    expect(groups(fullRoot([bare], NOW))[0].subtitle).toBe("~/.claude-work · Rate limited · retrying at 7:05 AM");
+    expect("Rate limited · retrying at 12:05 PM".length).toBeLessThanOrEqual(80);
+  });
+
   it("an expired account says how to sign in again and leads with Copy Sign-in Command", () => {
     const [g] = groups(sidebarRoot([account({ state: { status: "expired", windows: [] } })], NOW));
     expect(g.accessory).toMatchObject({ text: "Expired", color: "failure" });
@@ -80,6 +90,7 @@ describe("sidebarRoot", () => {
   it("every group offers Refresh, both add actions and Remove Account", () => {
     const [g] = groups(sidebarRoot([account()], NOW));
     expect((g.actions ?? []).map((a) => a.title)).toEqual(["Refresh", "Add Claude Account…", "Add Codex Account…", "Remove Account"]);
+    expect(g.actions?.[0]).toMatchObject({ type: "callback", id: "refresh", payload: { id: "a1" } }); // per-account refresh
     expect(g.actions?.[3]).toMatchObject({ type: "callback", id: "remove", payload: { id: "a1" }, sfSymbol: "minus.circle" });
   });
 });

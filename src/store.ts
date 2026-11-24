@@ -12,6 +12,8 @@ export interface Persisted {
   order: string[];
   labels: Record<string, string>;
   snapshots: Record<string, Snapshot>;
+  /** Epoch ms before which an account is left alone. Absent in state saved by v0.1.0. */
+  nextAttempts: Record<string, number>;
 }
 
 export const STATE_KEY = "state";
@@ -19,7 +21,7 @@ export const STATE_KEY = "state";
 export const MAX_STATE_CHARS = 15_000;
 const MAX_LABEL_CHARS = 60;
 
-export const emptyPersisted = (): Persisted => ({ order: [], labels: {}, snapshots: {} });
+export const emptyPersisted = (): Persisted => ({ order: [], labels: {}, snapshots: {}, nextAttempts: {} });
 
 const WINDOW_KEYS: ReadonlySet<string> = new Set(["session", "weekly", "weekly-opus", "weekly-sonnet"]);
 
@@ -52,7 +54,10 @@ export function sanitize(raw: unknown): Persisted {
   const snapshots = isRecord(raw.snapshots)
     ? Object.fromEntries(Object.entries(raw.snapshots).flatMap(([id, s]) => readSnapshot(s).map((snap) => [id, snap] as const)))
     : {};
-  return { order, labels, snapshots };
+  const nextAttempts = isRecord(raw.nextAttempts)
+    ? Object.fromEntries(Object.entries(raw.nextAttempts).flatMap(([id, at]) => (finiteNumber(at) === undefined ? [] : [[id, Number(at)] as const])))
+    : {};
+  return { order, labels, snapshots, nextAttempts };
 }
 
 export async function loadPersisted(leo: Pick<LeoV2, "secrets">): Promise<Persisted> {
@@ -65,7 +70,7 @@ export async function loadPersisted(leo: Pick<LeoV2, "secrets">): Promise<Persis
   }
 }
 
-/** Drops the oldest snapshots until the JSON fits; order and labels always survive. */
+/** Drops the oldest snapshots until the JSON fits; order, labels and retry times always survive. */
 export function fit(state: Persisted): Persisted {
   const byAge = Object.entries(state.snapshots).sort((a, b) => a[1].updatedAtMs - b[1].updatedAtMs);
   const trimmed = (dropped: number): Persisted => ({ ...state, snapshots: Object.fromEntries(byAge.slice(dropped)) });

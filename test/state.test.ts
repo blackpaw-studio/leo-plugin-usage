@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BACKOFF_MS, initialState, isDue, reduce } from "../src/state";
+import { initialState, isDue, reduce } from "../src/state";
 import type { UsageWindow } from "../src/window";
 
 const NOW = 1_000_000;
@@ -45,17 +45,24 @@ describe("account state reducer", () => {
   it("a success clears an earlier backoff and message", () => {
     const limited = reduce(initialState(), { kind: "rateLimited" }, NOW);
     const s = reduce(limited, { kind: "ok", windows: w }, NOW + 1);
-    expect(s.backoffUntilMs).toBeUndefined();
+    expect(s.nextAttemptAtMs).toBeUndefined();
     expect(s.message).toBeUndefined();
   });
 
-  it("429 backs the account off for 15 minutes and keeps stale values", () => {
+  it("429 backs the account off for the stated delay and keeps stale values", () => {
     const good = reduce(initialState(), { kind: "ok", windows: w }, NOW);
-    const s = reduce(good, { kind: "rateLimited" }, NOW + 10);
-    expect(BACKOFF_MS).toBe(15 * 60_000);
-    expect(s).toMatchObject({ status: "stale", backoffUntilMs: NOW + 10 + BACKOFF_MS });
-    expect(isDue(s, NOW + 10 + BACKOFF_MS - 1)).toBe(false);
-    expect(isDue(s, NOW + 10 + BACKOFF_MS)).toBe(true);
+    const s = reduce(good, { kind: "rateLimited", retryAfterMs: 120_000 }, NOW + 10);
+    expect(s).toMatchObject({ status: "stale", message: "Rate limited", nextAttemptAtMs: NOW + 10 + 120_000 });
+    expect(isDue(s, NOW + 10 + 120_000 - 1)).toBe(false);
+    expect(isDue(s, NOW + 10 + 120_000)).toBe(true);
+  });
+
+  it("consecutive 429s without a delay double the default and a success resets it", () => {
+    const first = reduce(initialState(), { kind: "rateLimited" }, NOW);
+    const second = reduce(first, { kind: "rateLimited" }, NOW);
+    expect([first.nextAttemptAtMs, second.nextAttemptAtMs]).toEqual([NOW + 300_000, NOW + 600_000]);
+    const ok = reduce(second, { kind: "ok", windows: w }, NOW);
+    expect(reduce(ok, { kind: "rateLimited" }, NOW).nextAttemptAtMs).toBe(NOW + 300_000);
   });
 
   it("an account with no backoff is always due", () => {

@@ -1,3 +1,4 @@
+import { FAILURE_BACKOFF_MS, rateLimitDelayMs } from "./retry";
 import type { UsageWindow } from "./window";
 
 export type AccountStatus = "loading" | "ok" | "stale" | "expired" | "needsAuthorization" | "error";
@@ -10,18 +11,21 @@ export interface AccountState {
   updatedAtMs?: number;
   /** Failure reason for stale/error states. */
   message?: string;
-  /** Epoch ms before which the poller leaves this account alone (after a 429). */
-  backoffUntilMs?: number;
+  /** Epoch ms before which the poller leaves this account alone (after a 429 or another failure). */
+  nextAttemptAtMs?: number;
+  /** Consecutive 429s, for the doubling default wait. */
+  rateLimitStreak?: number;
 }
 
 export type Outcome =
   | { kind: "ok"; windows: readonly UsageWindow[] }
   | { kind: "unauthorized" }
   | { kind: "needsAuthorization" }
-  | { kind: "rateLimited" }
+  | { kind: "rateLimited"; retryAfterMs?: number }
+  | { kind: "throttled"; retryAfterMs: number }
   | { kind: "failed"; message: string };
 
-export const BACKOFF_MS = 15 * 60_000;
+export const RATE_LIMITED = "Rate limited";
 export const NO_DATA = "No usage data";
 
 export const initialState = (): AccountState => ({ status: "loading", windows: [] });
@@ -33,21 +37,31 @@ const degrade = (state: AccountState, message: string, extra: Partial<AccountSta
     : { windows: [], ...extra, status: "error", message };
 
 export function reduce(state: AccountState, outcome: Outcome, nowMs: number): AccountState {
+  const { nextAttemptAtMs: _wait, rateLimitStreak, ...settled } = state;
+  const failure = { nextAttemptAtMs: nowMs + FAILURE_BACKOFF_MS };
   switch (outcome.kind) {
     case "ok":
       return outcome.windows.length === 0
-        ? { status: "error", windows: [], message: NO_DATA }
+        ? { status: "error", windows: [], message: NO_DATA, ...failure }
         : { status: "ok", windows: outcome.windows, updatedAtMs: nowMs };
     case "unauthorized":
-      return { status: "expired", windows: [] };
+      return { status: "expired", windows: [], ...failure };
     case "needsAuthorization":
       return { status: "needsAuthorization", windows: [] };
-    case "rateLimited":
-      return degrade(state, "Rate limited", { backoffUntilMs: nowMs + BACKOFF_MS });
+    case "rateLimited": {
+      const streak = (rateLimitStreak ?? 0) + 1;
+      const wait = rateLimitDelayMs(outcome.retryAfterMs, streak);
+      return degrade(settled, RATE_LIMITED, { nextAttemptAtMs: nowMs + wait, rateLimitStreak: streak });
+    }
+    case "throttled":
+      return degrade(settled, RATE_LIMITED, { nextAttemptAtMs: nowMs + outcome.retryAfterMs });
     case "failed":
-      return degrade(state, outcome.message);
+      return degrade(settled, outcome.message, failure);
   }
 }
 
 export const isDue = (state: AccountState, nowMs: number): boolean =>
-  state.backoffUntilMs === undefined || nowMs >= state.backoffUntilMs;
+  state.nextAttemptAtMs === undefined || nowMs >= state.nextAttemptAtMs;
+
+export const isFresh = (state: AccountState, nowMs: number, maxAgeMs: number): boolean =>
+  state.updatedAtMs !== undefined && nowMs - state.updatedAtMs < maxAgeMs;

@@ -3,7 +3,9 @@ import type { CredentialKind, Handle, LeoV2 } from "./api";
 import type { Clock } from "./clock";
 import { parseClaude } from "./parse/claude";
 import { parseCodex } from "./parse/codex";
-import { initialState, isDue, reduce, type AccountState, type Outcome } from "./state";
+import { BYPASS_INTERVAL_MS, FRESH_MS, MANUAL_FRESH_MS, mergeRefresh, type RefreshOptions } from "./refresh";
+import { headerValue, isThrottle, parseRetryAfter, throttleDelayMs } from "./retry";
+import { initialState, isDue, isFresh, reduce, type AccountState, type Outcome } from "./state";
 import { loadPersisted, savePersisted, type Persisted } from "./store";
 import type { UsageWindow } from "./window";
 
@@ -28,15 +30,10 @@ export interface Account {
   state: AccountState;
 }
 
-export interface RefreshOptions {
-  /** Manual refresh: ignore 429 backoff. */
-  force?: boolean;
-}
-
 export interface Poller {
   /** Reconcile with `credentials.list()` and restore persisted state. */
   sync(): Promise<void>;
-  /** Refresh every due account, one request at a time. Concurrent calls share one pass. */
+  /** Refresh every due, stale account, one request at a time. Concurrent calls share one pass. */
   refresh(options?: RefreshOptions): Promise<void>;
   /** Local setup only, no network: register the 5-minute timer (once) and do the first sync. */
   init(): Promise<void>;
@@ -51,12 +48,12 @@ export const defaultLabel = (handle: Handle): string => (handle.label.startsWith
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-async function fetchOutcome(leo: LeoV2, handle: Handle): Promise<Outcome> {
+async function fetchOutcome(leo: LeoV2, handle: Handle, nowMs: number): Promise<Outcome> {
   const provider = PROVIDERS[handle.kind];
   try {
     const res = await leo.fetch(provider.url, { credential: handle.id, headers: { Accept: "application/json" } });
     if (res.status === 401) return { kind: "unauthorized" };
-    if (res.status === 429) return { kind: "rateLimited" };
+    if (res.status === 429) return { kind: "rateLimited", retryAfterMs: parseRetryAfter(headerValue(res.headers, "retry-after"), nowMs) };
     if (res.status !== 200) return { kind: "failed", message: "HTTP " + res.status };
     try {
       return { kind: "ok", windows: provider.parse(JSON.parse(res.body)) };
@@ -65,14 +62,19 @@ async function fetchOutcome(leo: LeoV2, handle: Handle): Promise<Outcome> {
     }
   } catch (e) {
     const message = errorMessage(e);
-    return message.includes("credentialNeedsAuthorization") ? { kind: "needsAuthorization" } : { kind: "failed", message };
+    if (message.includes("credentialNeedsAuthorization")) return { kind: "needsAuthorization" };
+    return isThrottle(message) ? { kind: "throttled", retryAfterMs: throttleDelayMs(message) } : { kind: "failed", message };
   }
 }
+
+export type { RefreshOptions };
 
 export function createPoller(leo: LeoV2, clock: Clock, onChange: () => void): Poller {
   let entries: Array<{ handle: Handle; state: AccountState }> = [];
   let persisted: Persisted | null = null;
   let inFlight: Promise<void> | null = null;
+  /** When each account last used its once-a-minute backoff bypass. */
+  const lastBypassAt = new Map<string, number>();
 
   const persist = async (): Promise<void> => {
     const base = persisted ?? (await loadPersisted(leo));
@@ -86,6 +88,11 @@ export function createPoller(leo: LeoV2, clock: Clock, onChange: () => void): Po
             : [],
         ),
       ),
+      nextAttempts: Object.fromEntries(
+        entries.flatMap((e) =>
+          e.state.nextAttemptAtMs !== undefined && e.state.nextAttemptAtMs > clock.now() ? [[e.handle.id, e.state.nextAttemptAtMs] as const] : [],
+        ),
+      ),
     };
     await savePersisted(leo, persisted);
   };
@@ -97,7 +104,9 @@ export function createPoller(leo: LeoV2, clock: Clock, onChange: () => void): Po
 
   const restore = (handle: Handle, saved: Persisted): AccountState => {
     const snap = saved.snapshots[handle.id];
-    return snap ? { status: "ok", windows: snap.windows, updatedAtMs: snap.updatedAtMs } : initialState();
+    const nextAttemptAtMs = saved.nextAttempts[handle.id];
+    const base: AccountState = snap ? { status: "ok", windows: snap.windows, updatedAtMs: snap.updatedAtMs } : initialState();
+    return nextAttemptAtMs === undefined ? base : { ...base, nextAttemptAtMs };
   };
 
   const sync = async (): Promise<void> => {
@@ -117,11 +126,23 @@ export function createPoller(leo: LeoV2, clock: Clock, onChange: () => void): Po
     onChange();
   };
 
+  /** True when `id` may skip its backoff now; spends its once-a-minute allowance. */
+  const claimBypass = (id: string, options: RefreshOptions): boolean => {
+    if (!options.bypassBackoff?.includes(id)) return false;
+    const last = lastBypassAt.get(id);
+    if (last !== undefined && clock.now() - last < BYPASS_INTERVAL_MS) return false;
+    lastBypassAt.set(id, clock.now());
+    return true;
+  };
+
+  const shouldFetch = (state: AccountState, id: string, options: RefreshOptions): boolean =>
+    claimBypass(id, options) || (isDue(state, clock.now()) && !isFresh(state, clock.now(), options.manual ? MANUAL_FRESH_MS : FRESH_MS));
+
   const pass = async (options: RefreshOptions): Promise<void> => {
     for (const { handle } of [...entries]) {
       const current = entries.find((e) => e.handle.id === handle.id);
-      if (!current || (!options.force && !isDue(current.state, clock.now()))) continue;
-      const outcome = await fetchOutcome(leo, handle);
+      if (!current || (options.ids && !options.ids.includes(handle.id)) || !shouldFetch(current.state, handle.id, options)) continue;
+      const outcome = await fetchOutcome(leo, handle, clock.now());
       if (entries.some((e) => e.handle.id === handle.id)) {
         setState(handle.id, reduce(entries.find((e) => e.handle.id === handle.id)?.state ?? initialState(), outcome, clock.now()));
       }
@@ -129,7 +150,7 @@ export function createPoller(leo: LeoV2, clock: Clock, onChange: () => void): Po
     await persist();
   };
 
-  /** Requests that arrived during a pass; they collapse into one follow-up that keeps `force` if any asked for it. */
+  /** Requests that arrived during a pass; they collapse into one follow-up covering all of them. */
   let queued: RefreshOptions | null = null;
 
   const run = async (first: RefreshOptions): Promise<void> => {
@@ -143,7 +164,7 @@ export function createPoller(leo: LeoV2, clock: Clock, onChange: () => void): Po
 
   const refresh = (options: RefreshOptions = {}): Promise<void> => {
     if (inFlight) {
-      queued = { force: (queued?.force ?? false) || options.force === true };
+      queued = queued === null ? options : mergeRefresh(queued, options);
       return inFlight;
     }
     inFlight = run(options).finally(() => {

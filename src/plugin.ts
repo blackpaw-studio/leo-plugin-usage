@@ -77,14 +77,14 @@ export function createPlugin(leo: LeoV2, clock: Clock): void {
     }
     if (!handle) return;
     await poller.sync();
-    await poller.refresh({ force: true });
+    await poller.refresh({ ids: [handle.id] });
   };
 
   /** Gesture-only, like add. */
   const authorize = async (id: string): Promise<void> => {
     const pending = leo.credentials.authorize(id);
     await pending;
-    await poller.refresh({ force: true });
+    await poller.refresh({ ids: [id] });
   };
 
   const activate = async (slot?: SlotID): Promise<void> => {
@@ -116,8 +116,14 @@ export function createPlugin(leo: LeoV2, clock: Clock): void {
 
   const refreshNow = async (slot?: SlotID): Promise<void> => {
     await start();
-    await poller.refresh({ force: true });
+    await poller.refresh({ manual: true }); // a manual pass still waits out every account's backoff
     if (slot?.kind === "palette") leo.render(slot, note("Usage refreshed", undefined, "checkmark.circle.fill"));
+  };
+
+  /** The account's own Refresh action: the only way past a backoff, once a minute per account. */
+  const refreshAccount = async (id: string): Promise<void> => {
+    await start();
+    await poller.refresh({ ids: [id], manual: true, bypassBackoff: [id] });
   };
 
   const callbackHandler = (id: string, payload: JSONValue): Promise<CallbackResult> => {
@@ -131,8 +137,10 @@ export function createPlugin(leo: LeoV2, clock: Clock): void {
         const target = str(body.id);
         return target ? authorize(target).then(() => null) : Promise.resolve(null);
       }
-      case CALLBACKS.refresh:
-        return refreshNow().then(() => null);
+      case CALLBACKS.refresh: {
+        const target = str(body.id);
+        return (target ? refreshAccount(target) : refreshNow()).then(() => null);
+      }
       case CALLBACKS.remove: {
         const target = str(body.id);
         return target ? removeAccount(target).then(() => null) : Promise.resolve(null);

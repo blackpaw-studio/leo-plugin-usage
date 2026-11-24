@@ -17,6 +17,9 @@ const setup = (handles: Handle[]) => {
   return { stub, poller, changes };
 };
 
+const MIN = 60_000;
+const refreshOne = (id: string) => ({ ids: [id], manual: true, bypassBackoff: [id] });
+
 const stateOf = (p: ReturnType<typeof createPoller>, id: string) => p.accounts().find((a) => a.handle.id === id)?.state;
 
 describe("poller", () => {
@@ -53,7 +56,7 @@ describe("poller", () => {
     await poller.sync();
     await Promise.all([poller.refresh(), poller.refresh()]);
     expect(stub.maxInFlight).toBe(1);
-    expect(stub.fetches).toHaveLength(6); // the second refresh queued exactly one follow-up pass
+    expect(stub.fetches).toHaveLength(3); // the follow-up pass found every account fresh
   });
 
   it.each([
@@ -76,33 +79,25 @@ describe("poller", () => {
     stub.route("GET", CLAUDE_URL, { body: claudeFull }, { status: 503 });
     await poller.sync();
     await poller.refresh();
-    await poller.refresh({ force: true });
+    stub.clock.advance(5 * MIN);
+    await poller.refresh();
     expect(stateOf(poller, "c1")).toMatchObject({ status: "stale", message: "HTTP 503" });
     expect(stateOf(poller, "c1")?.windows).toHaveLength(4);
   });
 
-  it("429 skips that account for 15 minutes but keeps polling the others", async () => {
+  it("429 skips that account until its backoff ends but keeps polling the others", async () => {
     const { stub, poller } = setup([claude, codex]);
     stub.route("GET", CLAUDE_URL, { status: 429 }, { body: claudeFull });
     stub.route("GET", CODEX_URL, { body: codexFull });
     await poller.sync();
     await poller.refresh();
     expect(stub.fetches).toHaveLength(2);
-    stub.clock.advance(5 * 60_000);
+    stub.clock.advance(5 * MIN - 1_000); // inside c1's backoff; x1's data is old enough to refetch
     await poller.refresh();
     expect(stub.fetches.map((f) => f.credential)).toEqual(["c1", "x1", "x1"]);
-    stub.clock.advance(10 * 60_000);
+    stub.clock.advance(1_000);
     await poller.refresh();
     expect(stub.fetches.filter((f) => f.credential === "c1")).toHaveLength(2);
-    expect(stateOf(poller, "c1")?.status).toBe("ok");
-  });
-
-  it("a manual refresh ignores backoff", async () => {
-    const { stub, poller } = setup([claude]);
-    stub.route("GET", CLAUDE_URL, { status: 429 }, { body: claudeFull });
-    await poller.sync();
-    await poller.refresh();
-    await poller.refresh({ force: true });
     expect(stateOf(poller, "c1")?.status).toBe("ok");
   });
 
@@ -118,19 +113,19 @@ describe("poller", () => {
     const third = poller.refresh();
     await Promise.all([first, added, again, third]);
     expect(stub.fetches.filter((f) => f.credential === "x1")).toHaveLength(1);
-    expect(stub.fetches.filter((f) => f.credential === "c1")).toHaveLength(2); // original pass + the one follow-up
+    expect(stub.fetches.filter((f) => f.credential === "c1")).toHaveLength(1); // fresh from the first pass
     expect(stub.maxInFlight).toBe(1);
   });
 
-  it("a forced refresh during a non-forced pass bypasses the 429 backoff in the follow-up", async () => {
+  it("a per-account refresh queued during a pass still bypasses that account's backoff", async () => {
     const { stub, poller } = setup([claude, codex]);
     stub.route("GET", CLAUDE_URL, { status: 429 }, { body: claudeFull });
     stub.route("GET", CODEX_URL, { body: codexFull });
     await poller.sync();
     await poller.refresh();
-    stub.clock.advance(5 * 60_000);
+    stub.clock.advance(MIN);
     const timerPass = poller.refresh();
-    const manual = poller.refresh({ force: true });
+    const manual = poller.refresh(refreshOne("c1"));
     await Promise.all([timerPass, manual]);
     expect(stateOf(poller, "c1")?.status).toBe("ok");
     expect(stub.maxInFlight).toBe(1);
@@ -186,5 +181,232 @@ describe("poller", () => {
     expect(restored?.label).toBe("Work");
     expect(restored?.state.windows).toHaveLength(4);
     expect(restored?.state.status).toBe("ok");
+  });
+});
+
+describe("rate limiting", () => {
+  const limited = (headers?: Record<string, string>) => ({ status: 429, ...(headers ? { headers } : {}) });
+  const fetchCount = (stub: ReturnType<typeof setup>["stub"]) => stub.fetches.length;
+
+  /** Refreshes `ms - 1` into the wait (must not fetch), then at `ms` (must fetch). */
+  const expectRetryAfter = async (ctx: ReturnType<typeof setup>, ms: number): Promise<void> => {
+    const before = fetchCount(ctx.stub);
+    ctx.stub.clock.advance(ms - 1);
+    await ctx.poller.refresh();
+    expect(fetchCount(ctx.stub)).toBe(before);
+    ctx.stub.clock.advance(1);
+    await ctx.poller.refresh();
+    expect(fetchCount(ctx.stub)).toBe(before + 1);
+  };
+
+  it.each([
+    ["Retry-After", "120", 2 * MIN],
+    ["retry-after", "120", 2 * MIN],
+    ["RETRY-AFTER", "300", 5 * MIN],
+    ["Retry-After", "5", MIN], // floor of one minute
+    ["Retry-After", "0", MIN],
+    ["Retry-After", "86400", 60 * MIN], // cap of one hour
+  ])("429 with %s: %s waits %d ms", async (name, value, wait) => {
+    const ctx = setup([claude]);
+    ctx.stub.route("GET", CLAUDE_URL, limited({ [name]: value }));
+    await ctx.poller.sync();
+    await ctx.poller.refresh();
+    await expectRetryAfter(ctx, wait);
+  });
+
+  it("reads an HTTP-date Retry-After", async () => {
+    const ctx = setup([claude]);
+    ctx.stub.route("GET", CLAUDE_URL, limited({ "retry-after": new Date(ctx.stub.clock.now() + 10 * MIN).toUTCString() }));
+    await ctx.poller.sync();
+    await ctx.poller.refresh();
+    await expectRetryAfter(ctx, 10 * MIN);
+  });
+
+  it("a Retry-After date in the past still waits the one-minute floor", async () => {
+    const ctx = setup([claude]);
+    ctx.stub.route("GET", CLAUDE_URL, limited({ "retry-after": new Date(ctx.stub.clock.now() - 10 * MIN).toUTCString() }));
+    await ctx.poller.sync();
+    await ctx.poller.refresh();
+    await expectRetryAfter(ctx, MIN);
+  });
+
+  it.each([[undefined], [{ "retry-after": "soon" }], [{ "retry-after": "-5" }]])(
+    "429 without a usable Retry-After (%j) waits 5 minutes, then doubles, capped at an hour",
+    async (headers) => {
+      const ctx = setup([claude]);
+      ctx.stub.route("GET", CLAUDE_URL, limited(headers));
+      await ctx.poller.sync();
+      await ctx.poller.refresh();
+      for (const minutes of [5, 10, 20, 40, 60, 60]) await expectRetryAfter(ctx, minutes * MIN);
+    },
+  );
+
+  it("a 200 clears the backoff and the doubling", async () => {
+    const ctx = setup([claude]);
+    ctx.stub.route("GET", CLAUDE_URL, limited(), limited(), { body: claudeFull }, limited());
+    await ctx.poller.sync();
+    await ctx.poller.refresh();
+    await expectRetryAfter(ctx, 5 * MIN);
+    await expectRetryAfter(ctx, 10 * MIN); // third request is the 200
+    expect(stateOf(ctx.poller, "c1")).toMatchObject({ status: "ok", updatedAtMs: ctx.stub.clock.now() });
+    expect(stateOf(ctx.poller, "c1")?.nextAttemptAtMs).toBeUndefined();
+    ctx.stub.clock.advance(4 * MIN);
+    await ctx.poller.refresh(); // the 429 after the success starts over at 5 minutes
+    await expectRetryAfter(ctx, 5 * MIN);
+  });
+
+  it("a restarted poller honours the persisted backoff", async () => {
+    const first = setup([claude]);
+    first.stub.route("GET", CLAUDE_URL, limited({ "retry-after": "600" }));
+    await first.poller.sync();
+    await first.poller.refresh();
+    const second = createPoller(first.stub.leo, first.stub.clock, () => {});
+    await second.start();
+    expect(first.stub.fetches).toHaveLength(1);
+    first.stub.clock.advance(10 * MIN - 1);
+    await second.refresh();
+    expect(first.stub.fetches).toHaveLength(1);
+    first.stub.clock.advance(1);
+    await second.refresh();
+    expect(first.stub.fetches).toHaveLength(2);
+  });
+
+  it("refresh-all never bypasses a backoff", async () => {
+    const { stub, poller } = setup([claude]);
+    stub.route("GET", CLAUDE_URL, limited(), { body: claudeFull });
+    await poller.sync();
+    await poller.refresh();
+    await poller.refresh({ manual: true });
+    expect(stub.fetches).toHaveLength(1);
+  });
+
+  it("a per-account refresh bypasses the backoff, but only once per account per minute", async () => {
+    const { stub, poller } = setup([claude, claude2]);
+    stub.route("GET", CLAUDE_URL, limited());
+    await poller.sync();
+    await poller.refresh();
+    expect(stub.fetches).toHaveLength(2);
+    await poller.refresh(refreshOne("c1"));
+    expect(stub.fetches.map((f) => f.credential)).toEqual(["c1", "c2", "c1"]); // c2's backoff untouched
+    stub.clock.advance(MIN - 1_000);
+    await poller.refresh(refreshOne("c1"));
+    expect(stub.fetches).toHaveLength(3);
+    stub.clock.advance(1_000);
+    await poller.refresh(refreshOne("c1"));
+    expect(stub.fetches).toHaveLength(4);
+    await poller.refresh(refreshOne("c2")); // its own allowance
+    expect(stub.fetches.map((f) => f.credential).slice(-1)).toEqual(["c2"]);
+  });
+
+  it("shows the rate-limit reason and the retry time on the account state", async () => {
+    const { stub, poller } = setup([claude]);
+    stub.route("GET", CLAUDE_URL, limited({ "retry-after": "600" }));
+    await poller.sync();
+    await poller.refresh();
+    expect(stateOf(poller, "c1")).toMatchObject({ status: "error", message: "Rate limited", nextAttemptAtMs: stub.clock.now() + 10 * MIN });
+  });
+});
+
+describe("freshness", () => {
+  it("a pass skips an account fetched less than 4 minutes ago", async () => {
+    const { stub, poller } = setup([claude]);
+    stub.route("GET", CLAUDE_URL, { body: claudeFull });
+    await poller.sync();
+    await poller.refresh();
+    stub.clock.advance(4 * MIN - 1);
+    await poller.refresh();
+    expect(stub.fetches).toHaveLength(1);
+    stub.clock.advance(1);
+    await poller.refresh();
+    expect(stub.fetches).toHaveLength(2);
+  });
+
+  it("the launch pass after a restart skips accounts whose stored snapshot is fresh", async () => {
+    const first = setup([claude, codex]);
+    first.stub.route("GET", CLAUDE_URL, { body: claudeFull });
+    first.stub.route("GET", CODEX_URL, { body: codexFull });
+    await first.poller.start();
+    expect(first.stub.fetches).toHaveLength(2);
+    first.stub.clock.advance(3 * MIN);
+    const relaunched = createPoller(first.stub.leo, first.stub.clock, () => {});
+    await relaunched.start();
+    expect(first.stub.fetches).toHaveLength(2);
+    expect(relaunched.accounts().map((a) => a.state.status)).toEqual(["ok", "ok"]);
+    first.stub.clock.advance(MIN);
+    const later = createPoller(first.stub.leo, first.stub.clock, () => {});
+    await later.start();
+    expect(first.stub.fetches).toHaveLength(4);
+  });
+
+  it("a manual refresh-all skips accounts fetched in the last minute and refreshes the rest", async () => {
+    const { stub, poller } = setup([claude]);
+    stub.route("GET", CLAUDE_URL, { body: claudeFull });
+    await poller.sync();
+    await poller.refresh();
+    stub.clock.advance(MIN - 1_000);
+    await poller.refresh({ manual: true });
+    expect(stub.fetches).toHaveLength(1);
+    stub.clock.advance(1_000);
+    await poller.refresh({ manual: true });
+    expect(stub.fetches).toHaveLength(2);
+  });
+
+  it("refreshing named accounts fetches only those", async () => {
+    const { stub, poller } = setup([claude, claude2]);
+    stub.route("GET", CLAUDE_URL, { body: claudeFull });
+    await poller.sync();
+    await poller.refresh({ ids: ["c2"] });
+    expect(stub.fetches.map((f) => f.credential)).toEqual(["c2"]);
+  });
+});
+
+describe("failure backoff", () => {
+  it("a host limiter rejection backs the account off for the stated seconds", async () => {
+    const { stub, poller } = setup([claude]);
+    stub.route("GET", CLAUDE_URL, { reject: "rate limited: retry in 90 s" });
+    await poller.sync();
+    await poller.refresh();
+    expect(stateOf(poller, "c1")).toMatchObject({ status: "error", message: "Rate limited" });
+    stub.clock.advance(89_000);
+    await poller.refresh();
+    expect(stub.fetches).toHaveLength(1);
+    stub.clock.advance(1_000);
+    await poller.refresh();
+    expect(stub.fetches).toHaveLength(2);
+  });
+
+  it("a host limiter rejection without a number backs off 60 seconds", async () => {
+    const { stub, poller } = setup([claude]);
+    stub.route("GET", CLAUDE_URL, { reject: "stubLeo host: rate limited" });
+    await poller.sync();
+    await poller.refresh();
+    stub.clock.advance(MIN - 1);
+    await poller.refresh();
+    expect(stub.fetches).toHaveLength(1);
+    stub.clock.advance(1);
+    await poller.refresh();
+    expect(stub.fetches).toHaveLength(2);
+  });
+
+  it.each([[{ status: 401 }], [{ status: 500 }], [{ reject: "network down" }]])("%j backs off 5 minutes instead of retrying on every trigger", async (entry) => {
+    const { stub, poller } = setup([claude]);
+    stub.route("GET", CLAUDE_URL, entry);
+    await poller.sync();
+    await poller.refresh();
+    stub.clock.advance(5 * MIN - 1);
+    await poller.refresh();
+    expect(stub.fetches).toHaveLength(1);
+    stub.clock.advance(1);
+    await poller.refresh();
+    expect(stub.fetches).toHaveLength(2);
+  });
+
+  it("a locked account is not backed off, so granting access retries at once", async () => {
+    const { stub, poller } = setup([claude]);
+    stub.route("GET", CLAUDE_URL, { reject: "credentialNeedsAuthorization" }, { body: claudeFull });
+    await poller.sync();
+    await poller.refresh();
+    await poller.refresh();
+    expect(stateOf(poller, "c1")?.status).toBe("ok");
   });
 });

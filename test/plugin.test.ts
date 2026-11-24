@@ -153,13 +153,36 @@ describe("account actions", () => {
     expect(groupsOf(stub.lastRender(SECTION))[0].accessory).toMatchObject({ text: "Locked" });
   });
 
-  it("Refresh Usage forces a poll even during a 429 backoff", async () => {
+  it("Refresh Usage never bypasses a 429 backoff", async () => {
     const stub = boot();
     stub.setCredentials([work]);
     stub.route("GET", CLAUDE_URL, { status: 429 }, { body: claudeFull });
     await stub.emit("activate", SECTION);
     await stub.emit("command", "refresh", { kind: "palette", commandID: "refresh" });
-    expect(stub.fetches).toHaveLength(2);
+    expect(stub.fetches).toHaveLength(1);
+  });
+
+  it("an account's Refresh action bypasses its backoff, once per minute", async () => {
+    const stub = boot();
+    stub.setCredentials([work, codex]);
+    stub.route("GET", CLAUDE_URL, { status: 429 }, { body: claudeFull });
+    stub.route("GET", CODEX_URL, { body: codexFull });
+    await stub.emit("activate", SECTION);
+    const refresh = groupsOf(stub.lastRender(SECTION))[0].actions?.find((a) => a.title === "Refresh");
+    if (refresh?.type !== "callback") throw new Error("no Refresh callback");
+    await stub.emit("callback", refresh.id, refresh.payload ?? null);
+    expect(stub.fetches.map((f) => f.credential)).toEqual(["c1", "x1", "c1"]); // codex is fresh, so it was left alone
+    expect(groupsOf(stub.lastRender(SECTION))[0].accessory).toBeUndefined();
+    await stub.emit("callback", refresh.id, refresh.payload ?? null);
+    expect(stub.fetches).toHaveLength(3);
+  });
+
+  it("shows when a rate-limited account will retry", async () => {
+    const stub = boot();
+    stub.setCredentials([work]);
+    stub.route("GET", CLAUDE_URL, { status: 429, headers: { "Retry-After": "600" } });
+    await stub.emit("activate", SECTION);
+    expect(groupsOf(stub.lastRender(SECTION))[0].subtitle).toBe("Claude Code · Rate limited · retrying at 7:10 AM");
   });
 
   it("Remove drops the grant and the account", async () => {
@@ -194,6 +217,21 @@ describe("account actions", () => {
     await stub.emit("activate", SECTION);
     await stub.emit("callback", "rename", { formId: "rename", values: { label: "Work" }, payload: { id: "c1" } });
     expect(groupsOf(stub.lastRender(SECTION))[0].title).toBe("Work");
+  });
+});
+
+describe("adding an account", () => {
+  it("fetches only the new account", async () => {
+    const stub = boot();
+    stub.setCredentials([work, home, codex]);
+    stub.route("GET", CLAUDE_URL, { body: claudeFull });
+    stub.route("GET", CODEX_URL, { body: codexFull });
+    await stub.emit("activate", SECTION);
+    expect(stub.fetches).toHaveLength(3);
+    stub.queueAdd("claude-code", old);
+    await stub.emit("callback", "add", { kind: "claude-code" });
+    expect(stub.fetches.map((f) => f.credential)).toEqual(["c1", "c2", "x1", "c3"]);
+    expect(groupsOf(stub.lastRender(SECTION))).toHaveLength(4);
   });
 });
 
