@@ -4,7 +4,7 @@ import type { UsageWindow } from "./window";
 const WARNING_AT = 75;
 const FAILURE_AT = 90;
 
-export const toneFor = (percent: number): MeterTone => (percent >= FAILURE_AT ? "failure" : percent >= WARNING_AT ? "warning" : "success");
+export const toneFor = (percent: number): MeterTone => (percent >= FAILURE_AT ? "failure" : percent >= WARNING_AT ? "warning" : "neutral");
 
 const RANK: Record<MeterTone, number> = { neutral: 0, success: 1, warning: 2, failure: 3 };
 

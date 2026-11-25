@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clip, clockTime, percentText, resetsIn, updatedAgo } from "../src/format";
+import { agoShort, clip, clockTime, percentText, resetsCompact, resetsIn, updatedAgo } from "../src/format";
 
 const NOW = Date.UTC(2026, 0, 1, 12, 0, 0);
 const min = 60_000;
@@ -50,5 +50,27 @@ describe("clockTime", () => {
     expect(clockTime(Date.UTC(2026, 0, 2, 1, 57))).toBe("8:57 PM"); // TZ pinned to America/New_York in vitest.config
     expect(clockTime(Date.UTC(2026, 0, 1, 17, 5))).toBe("12:05 PM");
     expect(clockTime(Date.UTC(2026, 0, 1, 5, 0))).toBe("12:00 AM");
+  });
+});
+
+describe("resetsCompact", () => {
+  it.each([
+    [34 * min, "34m"],
+    [(3 * 24 + 5) * 60 * min, "3d 5h"],
+    [6 * 24 * 60 * min, "6d"],
+    [-min, "now"],
+  ])("offset %s ms → %s", (offset, text) => {
+    expect(resetsCompact(NOW + offset, NOW)).toBe(text);
+  });
+});
+
+describe("agoShort", () => {
+  it.each([
+    [10_000, "now"],
+    [5 * min, "5m ago"],
+    [2 * 60 * min, "2h ago"],
+    [3 * 24 * 60 * min, "3d ago"],
+  ])("age %s ms → %s", (age, text) => {
+    expect(agoShort(NOW - age, NOW)).toBe(text);
   });
 });

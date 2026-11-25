@@ -182,7 +182,7 @@ describe("account actions", () => {
     stub.setCredentials([work]);
     stub.route("GET", CLAUDE_URL, { status: 429, headers: { "Retry-After": "600" } });
     await stub.emit("activate", SECTION);
-    expect(groupsOf(stub.lastRender(SECTION))[0].subtitle).toBe("Claude Code · Rate limited · retrying at 7:10 AM");
+    expect(groupsOf(stub.lastRender(SECTION))[0].subtitle).toBe("Rate limited · retrying at 7:10 AM");
   });
 
   it("Remove drops the grant and the account", async () => {
@@ -292,7 +292,7 @@ describe("credentialsChanged", () => {
     await stub.emit("credentialsChanged");
     await flush(); // the refresh for the new account is queued, not awaited by the handler
     const renders = stub.rendersFor(SECTION).slice(before).map((r) => JSON.stringify(r));
-    expect(renders.some((r) => r.includes("Claude Code · Loading…"))).toBe(true);
+    expect(renders.some((r) => r.includes("Loading…"))).toBe(true);
     expect(stub.fetches.filter((f) => f.credential === "c1")).toHaveLength(1);
     expect(JSON.stringify(stub.lastRender(SECTION))).not.toContain("Loading…");
   });

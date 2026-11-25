@@ -17,6 +17,18 @@ const span = (ms: number): string => {
 export const resetsIn = (resetsAtMs: number, nowMs: number): string =>
   resetsAtMs <= nowMs ? "Resetting now" : "Resets in " + span(resetsAtMs - nowMs);
 
+/** Bare time to a reset ("34m", "3d 5h"), for the compact sidebar line under a meter. */
+export const resetsCompact = (resetsAtMs: number, nowMs: number): string => (resetsAtMs <= nowMs ? "now" : span(resetsAtMs - nowMs));
+
+/** Short age for the stale accessory ("2h ago"); the accessory text limit is 8 characters. */
+export const agoShort = (updatedAtMs: number, nowMs: number): string => {
+  const age = Math.max(0, nowMs - updatedAtMs);
+  if (age < MIN) return "now";
+  if (age < HOUR) return Math.floor(age / MIN) + "m ago";
+  if (age < DAY) return Math.floor(age / HOUR) + "h ago";
+  return Math.floor(age / DAY) + "d ago";
+};
+
 export const updatedAgo = (updatedAtMs: number, nowMs: number): string => {
   const age = Math.max(0, nowMs - updatedAtMs);
   if (age < MIN) return "Updated just now";

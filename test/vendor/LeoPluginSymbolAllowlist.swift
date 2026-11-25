@@ -12,7 +12,7 @@ public enum LeoPluginSymbolAllowlist {
         "exclamationmark.circle", "exclamationmark.circle.fill", "exclamationmark.triangle", "exclamationmark.triangle.fill",
         "questionmark.circle", "info.circle", "minus.circle", "plus.circle", "circle", "circle.fill", "circle.dotted",
         // Progress and time
-        "clock", "clock.fill", "hourglass", "timer", "arrow.clockwise", "arrow.triangle.2.circlepath",
+        "clock", "clock.fill", "sparkle", "hourglass", "timer", "arrow.clockwise", "arrow.triangle.2.circlepath",
         "arrow.up", "arrow.down", "arrow.up.circle", "arrow.down.circle", "pause.circle", "play.circle", "stop.circle",
         "ellipsis", "ellipsis.circle",
         // Work and code

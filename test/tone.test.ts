@@ -4,9 +4,11 @@ import { toneFor, worstTone, highestWindow } from "../src/tone";
 
 describe("toneFor", () => {
   it.each([
-    [0, "success"],
-    [74.9, "success"],
+    [0, "neutral"],
+    [74, "neutral"],
+    [74.9, "neutral"],
     [75, "warning"],
+    [89, "warning"],
     [89.9, "warning"],
     [90, "failure"],
     [100, "failure"],
@@ -29,9 +31,9 @@ describe("highestWindow", () => {
 });
 
 describe("worstTone", () => {
-  it("ranks failure over warning over success and ignores empty input", () => {
+  it("ranks failure over warning over neutral and ignores empty input", () => {
     expect(worstTone(["success", "warning", "failure"])).toBe("failure");
-    expect(worstTone(["success", "warning"])).toBe("warning");
+    expect(worstTone(["neutral", "warning"])).toBe("warning");
     expect(worstTone([])).toBeUndefined();
   });
 });

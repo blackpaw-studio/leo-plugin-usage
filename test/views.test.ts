@@ -28,19 +28,51 @@ describe("sidebarRoot", () => {
     expect(JSON.stringify(root)).toContain("add");
   });
 
-  it("shows a Session then a Weekly Meter per account, each toned", () => {
+  it("lays out an account as inline 5h and 7d meters whose detail is the compact reset time", () => {
     const [g] = groups(sidebarRoot([account()], NOW));
     expect(g.title).toBe(".claude-work"); // views show Account.label verbatim; the poller owns the default
+    expect(g.meterLayout).toBe("inline");
     expect(meters(g)).toEqual([
-      { type: "Meter", label: "Session", value: 0.42, valueText: "42%", detail: "Resets in 2h 14m", tone: "success" },
-      { type: "Meter", label: "Weekly", value: 0.91, valueText: "91%", detail: "Resets in 3d", tone: "failure" },
+      { type: "Meter", label: "5h", value: 0.42, valueText: "42%", detail: "2h 14m", tone: "neutral" },
+      { type: "Meter", label: "7d", value: 0.91, valueText: "91%", detail: "3d", tone: "failure" },
     ]);
   });
 
-  it("keeps Weekly as an empty placeholder when only Session is known, and leaves Opus/Sonnet out", () => {
+  it("keeps the full view stacked", () => {
+    expect(groups(fullRoot([account()], NOW))[0].meterLayout).toBeUndefined();
+  });
+
+  it("uses sparkle for Claude accounts and the terminal icon for Codex", () => {
+    const codexAcct = account({ handle: { id: "b", kind: "codex", label: ".codex", path: "~/.codex" } });
+    expect(groups(sidebarRoot([account()], NOW))[0].sfSymbol).toBe("sparkle");
+    expect(groups(sidebarRoot([codexAcct], NOW))[0].sfSymbol).toBe("terminal");
+  });
+
+  it.each([
+    [74, "neutral"],
+    [75, "warning"],
+    [89, "warning"],
+    [90, "failure"],
+  ] as const)("a %s%% window is %s in the sidebar, the full view and the header", (percent, tone) => {
+    const a = account({ state: { windows: [{ ...session, percent }, { ...weekly, percent: 1 }] } });
+    expect(meters(groups(sidebarRoot([a], NOW))[0])[0].tone).toBe(tone);
+    expect(meters(groups(fullRoot([a], NOW))[0])[0].tone).toBe(tone);
+    expect((sidebarRoot([a], NOW) as Accessory[])[0].color).toBe(tone);
+  });
+
+  it("shows a reset time under the bar only when the window reports one", () => {
+    const noReset = { key: "session", label: "Session", percent: 10 } as const;
+    const [g] = groups(sidebarRoot([account({ state: { windows: [noReset, weekly] } })], NOW));
+    expect(meters(g)[0]).not.toHaveProperty("detail");
+  });
+
+  it("a missing window is one dash with an empty track and no detail, and Opus/Sonnet stay out", () => {
     const opus = { key: "weekly-opus", label: "Weekly Opus", percent: 5 } as const;
     const [g] = groups(sidebarRoot([account({ state: { windows: [session, opus] } })], NOW));
-    expect(meters(g).map((m) => [m.label, m.valueText])).toEqual([["Session", "42%"], ["Weekly", "—"]]);
+    expect(meters(g)).toEqual([
+      { type: "Meter", label: "5h", value: 0.42, valueText: "42%", detail: "2h 14m", tone: "neutral" },
+      { type: "Meter", label: "7d", value: 0, valueText: "—", tone: "neutral" },
+    ]);
   });
 
   it("renders no meters for an account without data", () => {
@@ -52,6 +84,11 @@ describe("sidebarRoot", () => {
     const root = sidebarRoot([account(), account({ handle: { id: "b", kind: "codex", label: ".codex", path: "~/.codex" }, state: { windows: [session] } })], NOW);
     const first = (root as unknown[])[0] as Accessory;
     expect(first).toMatchObject({ type: "Accessory", text: "91%", color: "failure" });
+  });
+
+  it("keeps the header accessory neutral below 75%", () => {
+    const root = sidebarRoot([account({ state: { windows: [{ ...session, percent: 38 }] } })], NOW) as Accessory[];
+    expect(root[0]).toMatchObject({ text: "38%", color: "neutral" });
   });
 
   it("omits the header accessory when no account has data", () => {
@@ -66,18 +103,25 @@ describe("sidebarRoot", () => {
     expect(groups(fullRoot([account()], NOW))[0].subtitle).toBe("~/.claude-work · Updated 3m ago");
   });
 
-  it("marks a stale account and explains the old values", () => {
-    const [g] = groups(sidebarRoot([account({ state: { status: "stale", message: "HTTP 500" } })], NOW));
+  it("marks a stale account with a clock and its age, and keeps the reason in the tooltip", () => {
+    const [g] = groups(sidebarRoot([account({ state: { status: "stale", message: "HTTP 500", updatedAtMs: NOW - 2 * 3_600_000 } })], NOW));
+    expect(g.accessory).toMatchObject({ sfSymbol: "clock", text: "2h ago", color: "neutral", help: "Couldn't refresh · values from 5:00 AM" });
+    expect(meters(g)[0].detail).toBe("2h 14m"); // the reset time stays; the reason moves to the tooltip
+  });
+
+  it("the full view keeps the Stale accessory and the reason under the meters", () => {
+    const [g] = groups(fullRoot([account({ state: { status: "stale", message: "HTTP 500" } })], NOW));
     expect(g.accessory).toMatchObject({ text: "Stale", color: "warning" });
     expect(meters(g)[0].detail).toBe("Couldn't refresh · values from 6:57 AM");
   });
 
   it("a rate-limited account says when it retries, in place of the bare reason", () => {
     const retry = NOW + 5 * 60_000; // 7:05 AM in the suite's pinned zone
-    const stale = groups(sidebarRoot([account({ state: { status: "stale", message: "Rate limited", nextAttemptAtMs: retry } })], NOW))[0];
-    expect(meters(stale)[0].detail).toBe("Rate limited · retrying at 7:05 AM");
+    const state = { status: "stale", message: "Rate limited", nextAttemptAtMs: retry } as const;
+    expect(groups(sidebarRoot([account({ state })], NOW))[0].accessory).toMatchObject({ help: "Rate limited · retrying at 7:05 AM" });
+    expect(meters(groups(fullRoot([account({ state })], NOW))[0])[0].detail).toBe("Rate limited · retrying at 7:05 AM");
     const bare = account({ state: { status: "error", windows: [], message: "Rate limited", nextAttemptAtMs: retry } });
-    expect(groups(sidebarRoot([bare], NOW))[0].subtitle).toBe("Claude Code · Rate limited · retrying at 7:05 AM");
+    expect(groups(sidebarRoot([bare], NOW))[0].subtitle).toBe("Rate limited · retrying at 7:05 AM");
     expect(groups(fullRoot([bare], NOW))[0].subtitle).toBe("~/.claude-work · Rate limited · retrying at 7:05 AM");
     expect("Rate limited · retrying at 12:05 PM".length).toBeLessThanOrEqual(80);
   });
@@ -85,7 +129,8 @@ describe("sidebarRoot", () => {
   it("an expired account says how to sign in again and leads with Copy Sign-in Command", () => {
     const [g] = groups(sidebarRoot([account({ state: { status: "expired", windows: [] } })], NOW));
     expect(g.accessory).toMatchObject({ text: "Expired", color: "failure" });
-    expect(g.subtitle).toBe("Claude Code · Token expired — use this account in Claude Code to renew");
+    expect(g.subtitle).toBe("Token expired — use this account in Claude Code to renew");
+    expect(meters(g)).toEqual([]);
     expect(g.actions?.[0]).toMatchObject({ type: "copy", title: "Copy Sign-in Command", text: "CLAUDE_CONFIG_DIR=~/.claude-work claude" });
   });
 
@@ -97,9 +142,9 @@ describe("sidebarRoot", () => {
 
   it("an error account shows the reason, loading shows Loading…", () => {
     const err = groups(sidebarRoot([account({ state: { status: "error", windows: [], message: "No usage data" } })], NOW))[0];
-    expect(err).toMatchObject({ subtitle: "Claude Code · No usage data", accessory: { text: "Error" } });
+    expect(err).toMatchObject({ subtitle: "No usage data", accessory: { text: "Error" } });
     const loading = groups(sidebarRoot([account({ state: { status: "loading", windows: [] } })], NOW))[0];
-    expect(loading.subtitle).toBe("Claude Code · Loading…");
+    expect(loading.subtitle).toBe("Loading…");
   });
 
   it("every group offers Refresh, both add actions and Remove Account", () => {
@@ -115,7 +160,7 @@ describe("fullRoot", () => {
     const [g] = groups(fullRoot([account()], NOW));
     expect(g.subtitle).toBe("~/.claude-work · Updated 3m ago");
     expect(meters(g).map((m) => [m.label, m.valueText, m.tone])).toEqual([
-      ["Session", "42%", "success"],
+      ["Session", "42%", "neutral"],
       ["Weekly", "91%", "failure"],
     ]);
   });
@@ -186,7 +231,7 @@ describe("remote accounts", () => {
   it("an offline account with values reads '<machine> is offline · values from …'", () => {
     const state = { status: "stale", message: OFFLINE, windows: [session] } as const;
     const [g] = groups(sidebarRoot([remote({ state })], NOW));
-    expect(meters(g)[0].detail).toMatch(/^Dionysus is offline · values from /);
+    expect(g.accessory).toMatchObject({ sfSymbol: "clock", help: expect.stringMatching(/^Dionysus is offline · values from /) });
   });
 
   it("an offline account without values says the machine is offline", () => {
@@ -198,14 +243,14 @@ describe("remote accounts", () => {
   it("expired remote copy names the machine and tool, and keeps the sign-in command", () => {
     const state = { status: "expired", windows: [] } as const;
     const [g] = groups(sidebarRoot([remote({ state })], NOW));
-    expect(g.subtitle).toBe("Claude Code · Token expired — use this account in Claude Code (on Dionysus) to renew");
+    expect(g.subtitle).toBe("Token expired — use this account in Claude Code (on Dionysus) to renew");
     expect(g.actions?.[0]).toMatchObject({ type: "copy", title: "Copy Sign-in Command" });
   });
 
   it("expired Codex copy says Codex", () => {
     const state = { status: "expired", windows: [] } as const;
     const [g] = groups(sidebarRoot([remote({ state }, "codex")], NOW));
-    expect(g.subtitle).toBe("Codex · Token expired — use this account in Codex (on Dionysus) to renew");
+    expect(g.subtitle).toBe("Token expired — use this account in Codex (on Dionysus) to renew");
   });
 
   it("each remote copy string fits the 80-char help limit", () => {
@@ -217,7 +262,7 @@ describe("remote accounts", () => {
   it("expired local copy drops the machine", () => {
     const state = { status: "expired", windows: [] } as const;
     const [g] = groups(sidebarRoot([account({ state })], NOW));
-    expect(g.subtitle).toBe("Claude Code · Token expired — use this account in Claude Code to renew");
+    expect(g.subtitle).toBe("Token expired — use this account in Claude Code to renew");
   });
 
   it("clips long machine names to the host line limit", () => {

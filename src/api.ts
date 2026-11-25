@@ -40,6 +40,8 @@ export interface GroupNode {
   title: string;
   subtitle?: string;
   sfSymbol?: string;
+  /** Hosts that predate this field ignore it and stack the meters. */
+  meterLayout?: "stacked" | "inline";
   accessory?: Omit<Accessory, "type"> & { type: "Accessory" };
   children: Array<MeterNode | Accessory>;
   actions?: Action[];

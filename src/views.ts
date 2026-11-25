@@ -1,6 +1,6 @@
 import type { Accessory, AccessoryColor, Action, Form } from "../sdk/leo";
 import type { CredentialKind, GroupNode, MeterNode, MeterTone, UsageNode, UsageRoot } from "./api";
-import { MAX_HELP_CHARS, MAX_LINE_CHARS, clip, clockTime, percentText, resetsIn, updatedAgo } from "./format";
+import { MAX_HELP_CHARS, MAX_LINE_CHARS, agoShort, clip, clockTime, percentText, resetsCompact, resetsIn, updatedAgo } from "./format";
 import type { Account } from "./poller";
 import { NO_DATA, OFFLINE, RATE_LIMITED, type AccountState } from "./state";
 import { highestWindow, toneFor, worstTone } from "./tone";
@@ -16,7 +16,7 @@ export const CALLBACKS = {
 } as const;
 
 // Every symbol must be on the host allowlist (LeoPluginSymbolAllowlist.swift); test/symbols.test.ts enforces it.
-const KIND_SYMBOL: Record<CredentialKind, string> = { "claude-code": "bubble.left.fill", codex: "terminal" };
+const KIND_SYMBOL: Record<CredentialKind, string> = { "claude-code": "sparkle", codex: "terminal" };
 const KIND_NAME: Record<CredentialKind, string> = { "claude-code": "Claude Code", codex: "Codex" };
 const KIND_COMMAND: Record<CredentialKind, string> = { "claude-code": "claude", codex: "codex" };
 const HEADER_SYMBOL = "speedometer";
@@ -58,6 +58,28 @@ const meter = (w: UsageWindow, nowMs: number, detail?: string): MeterNode => ({
 });
 
 const MISSING = "—";
+
+/** Sidebar meter: short label, and the bare reset time as its detail when the window reports one. */
+const compactMeter = (w: UsageWindow | undefined, label: string, nowMs: number): MeterNode =>
+  w === undefined
+    ? { type: "Meter", label, value: 0, valueText: MISSING, tone: "neutral" }
+    : {
+        type: "Meter",
+        label,
+        value: w.percent / 100,
+        valueText: percentText(w.percent),
+        ...(w.resetsAtMs !== undefined ? { detail: resetsCompact(w.resetsAtMs, nowMs) } : {}),
+        tone: toneFor(w.percent),
+      };
+
+const SIDEBAR_WINDOWS: ReadonlyArray<readonly [UsageWindow["key"], string]> = [
+  ["session", "5h"],
+  ["weekly", "7d"],
+];
+
+/** 5h then 7d, each an empty placeholder when absent. Empty while the account has no data at all. */
+const sidebarMeters = (windows: readonly UsageWindow[], nowMs: number): MeterNode[] =>
+  windows.length === 0 ? [] : SIDEBAR_WINDOWS.map(([key, label]) => compactMeter(windows.find((w) => w.key === key), label, nowMs));
 
 /** An empty bar for a window the provider didn't report: no invented 0%. */
 const missingMeter = (label: string): MeterNode => ({
@@ -177,27 +199,44 @@ const renameForm = (account: Account): Form => ({
   ],
 });
 
-const group = (account: Account, children: GroupNode["children"], subtitle: string | undefined, actions: Action[]): GroupNode => {
-  const acc = stateAccessory(account.state);
+const group = (
+  account: Account,
+  children: GroupNode["children"],
+  subtitle: string | undefined,
+  actions: Action[],
+  acc: Accessory | undefined = stateAccessory(account.state),
+  layout: GroupNode["meterLayout"] = undefined,
+): GroupNode => {
   return {
     type: "Group",
     title: account.label,
     ...(subtitle !== undefined ? { subtitle } : {}),
     sfSymbol: KIND_SYMBOL[account.handle.kind],
+    ...(layout !== undefined ? { meterLayout: layout } : {}),
     ...(acc ? { accessory: acc } : {}),
     children,
     actions,
   };
 };
 
+/** Stale or offline values show a clock and their age; the reason goes in the tooltip. Other states use the shared accessory. */
+const sidebarAccessory = (account: Account, nowMs: number): Accessory | undefined => {
+  const { state } = account;
+  if (state.status !== "stale") return stateAccessory(state);
+  const help = staleDetail(account);
+  return {
+    ...accessory("clock", state.updatedAtMs !== undefined ? agoShort(state.updatedAtMs, nowMs) : "Stale", "neutral"),
+    ...(help !== undefined ? { help: clip(help, MAX_HELP_CHARS) } : {}),
+  };
+};
+
 const sidebarGroup = (account: Account, nowMs: number): GroupNode => {
-  const children = requiredMeters(account.state.windows, nowMs, staleDetail(account));
-  // The kind is always the subtitle (VoiceOver reads title, subtitle, state). The host hides it while a
-  // meter shows; without one, the state explanation follows the kind so it isn't lost.
+  const children = sidebarMeters(account.state.windows, nowMs);
+  // Without meters the state explanation is the second line; with them the host hides the subtitle.
   const text = children.length === 0 ? stateText(account) : undefined;
-  const kind = KIND_NAME[account.handle.kind];
-  const subtitle = clip(text === undefined ? kind : kind + " · " + text, MAX_LINE_CHARS);
-  return group(account, children, subtitle, [...leadingActions(account), refreshAction(account), ...addActions, removeAction(account)]);
+  const subtitle = clip(text ?? KIND_NAME[account.handle.kind], MAX_LINE_CHARS);
+  const actions = [...leadingActions(account), refreshAction(account), ...addActions, removeAction(account)];
+  return group(account, children, subtitle, actions, sidebarAccessory(account, nowMs), "inline");
 };
 
 const fullGroup = (account: Account, nowMs: number): GroupNode => {

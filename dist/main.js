@@ -357,6 +357,14 @@
     return pair(Math.floor(ms / DAY), "d", Math.floor(ms % DAY / HOUR), "h");
   };
   var resetsIn = (resetsAtMs, nowMs) => resetsAtMs <= nowMs ? "Resetting now" : "Resets in " + span(resetsAtMs - nowMs);
+  var resetsCompact = (resetsAtMs, nowMs) => resetsAtMs <= nowMs ? "now" : span(resetsAtMs - nowMs);
+  var agoShort = (updatedAtMs, nowMs) => {
+    const age = Math.max(0, nowMs - updatedAtMs);
+    if (age < MIN2) return "now";
+    if (age < HOUR) return Math.floor(age / MIN2) + "m ago";
+    if (age < DAY) return Math.floor(age / HOUR) + "h ago";
+    return Math.floor(age / DAY) + "d ago";
+  };
   var updatedAgo = (updatedAtMs, nowMs) => {
     const age = Math.max(0, nowMs - updatedAtMs);
     if (age < MIN2) return "Updated just now";
@@ -377,7 +385,7 @@
   // src/tone.ts
   var WARNING_AT = 75;
   var FAILURE_AT = 90;
-  var toneFor = (percent) => percent >= FAILURE_AT ? "failure" : percent >= WARNING_AT ? "warning" : "success";
+  var toneFor = (percent) => percent >= FAILURE_AT ? "failure" : percent >= WARNING_AT ? "warning" : "neutral";
   var RANK = { neutral: 0, success: 1, warning: 2, failure: 3 };
   var worstTone = (tones) => tones.reduce((worst, t) => worst === void 0 || RANK[t] > RANK[worst] ? t : worst, void 0);
   var highestWindow = (windows) => windows.reduce((best, w) => best === void 0 || w.percent > best.percent ? w : best, void 0);
@@ -390,7 +398,7 @@
     remove: "remove",
     rename: "rename"
   };
-  var KIND_SYMBOL = { "claude-code": "bubble.left.fill", codex: "terminal" };
+  var KIND_SYMBOL = { "claude-code": "sparkle", codex: "terminal" };
   var KIND_NAME = { "claude-code": "Claude Code", codex: "Codex" };
   var HEADER_SYMBOL = "speedometer";
   var callback = (id, title, sfSymbol, payload) => ({
@@ -423,6 +431,19 @@
     tone: toneFor(w.percent)
   });
   var MISSING = "\u2014";
+  var compactMeter = (w, label, nowMs) => w === void 0 ? { type: "Meter", label, value: 0, valueText: MISSING, tone: "neutral" } : {
+    type: "Meter",
+    label,
+    value: w.percent / 100,
+    valueText: percentText(w.percent),
+    ...w.resetsAtMs !== void 0 ? { detail: resetsCompact(w.resetsAtMs, nowMs) } : {},
+    tone: toneFor(w.percent)
+  };
+  var SIDEBAR_WINDOWS = [
+    ["session", "5h"],
+    ["weekly", "7d"]
+  ];
+  var sidebarMeters = (windows, nowMs) => windows.length === 0 ? [] : SIDEBAR_WINDOWS.map(([key, label]) => compactMeter(windows.find((w) => w.key === key), label, nowMs));
   var missingMeter = (label) => ({
     type: "Meter",
     label,
@@ -511,24 +532,33 @@
       }
     ]
   });
-  var group = (account, children, subtitle, actions) => {
-    const acc = stateAccessory(account.state);
+  var group = (account, children, subtitle, actions, acc = stateAccessory(account.state), layout = void 0) => {
     return {
       type: "Group",
       title: account.label,
       ...subtitle !== void 0 ? { subtitle } : {},
       sfSymbol: KIND_SYMBOL[account.handle.kind],
+      ...layout !== void 0 ? { meterLayout: layout } : {},
       ...acc ? { accessory: acc } : {},
       children,
       actions
     };
   };
+  var sidebarAccessory = (account, nowMs) => {
+    const { state } = account;
+    if (state.status !== "stale") return stateAccessory(state);
+    const help = staleDetail(account);
+    return {
+      ...accessory("clock", state.updatedAtMs !== void 0 ? agoShort(state.updatedAtMs, nowMs) : "Stale", "neutral"),
+      ...help !== void 0 ? { help: clip(help, MAX_HELP_CHARS) } : {}
+    };
+  };
   var sidebarGroup = (account, nowMs) => {
-    const children = requiredMeters(account.state.windows, nowMs, staleDetail(account));
+    const children = sidebarMeters(account.state.windows, nowMs);
     const text = children.length === 0 ? stateText(account) : void 0;
-    const kind = KIND_NAME[account.handle.kind];
-    const subtitle = clip(text === void 0 ? kind : kind + " \xB7 " + text, MAX_LINE_CHARS);
-    return group(account, children, subtitle, [...leadingActions(account), refreshAction(account), ...addActions, removeAction(account)]);
+    const subtitle = clip(text ?? KIND_NAME[account.handle.kind], MAX_LINE_CHARS);
+    const actions = [...leadingActions(account), refreshAction(account), ...addActions, removeAction(account)];
+    return group(account, children, subtitle, actions, sidebarAccessory(account, nowMs), "inline");
   };
   var fullGroup = (account, nowMs) => {
     const { state, handle } = account;
