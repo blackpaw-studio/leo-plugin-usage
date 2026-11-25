@@ -101,6 +101,14 @@
         "value": 0.03,
         "valueText": "3%",
         "tone": "success"
+      },
+      {
+        "type": "Meter",
+        "label": "Weekly",
+        "value": 0,
+        "valueText": "—",
+        "detail": "—",
+        "tone": "neutral"
       }
     ],
     "actions": [

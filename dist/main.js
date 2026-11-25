@@ -422,6 +422,28 @@
     ...detail !== void 0 ? { detail } : w.resetsAtMs !== void 0 ? { detail: resetsIn(w.resetsAtMs, nowMs) } : {},
     tone: toneFor(w.percent)
   });
+  var MISSING = "\u2014";
+  var missingMeter = (label) => ({
+    type: "Meter",
+    label,
+    value: 0,
+    valueText: MISSING,
+    detail: MISSING,
+    tone: "neutral"
+  });
+  var REQUIRED = [
+    ["session", "Session"],
+    ["weekly", "Weekly"]
+  ];
+  var fullMeters = (windows, nowMs, detail) => {
+    if (windows.length === 0) return [];
+    const required = REQUIRED.map(([key, label]) => {
+      const w = windows.find((x) => x.key === key);
+      return w ? meter(w, nowMs, detail) : missingMeter(label);
+    });
+    const extras = windows.filter((w) => !REQUIRED.some(([key]) => key === w.key)).map((w) => meter(w, nowMs, detail));
+    return [...required, ...extras];
+  };
   var stateAccessory = (state) => {
     switch (state.status) {
       case "stale":
@@ -518,7 +540,7 @@
     const detail = staleDetail(account);
     return group(
       account,
-      state.windows.map((w) => meter(w, nowMs, detail)),
+      fullMeters(state.windows, nowMs, detail),
       subtitle,
       [
         ...leadingActions(account),

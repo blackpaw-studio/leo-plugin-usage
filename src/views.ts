@@ -57,6 +57,34 @@ const meter = (w: UsageWindow, nowMs: number, detail?: string): MeterNode => ({
   tone: toneFor(w.percent),
 });
 
+const MISSING = "—";
+
+/** An empty bar for a window the provider didn't report: no invented 0%. */
+const missingMeter = (label: string): MeterNode => ({
+  type: "Meter",
+  label,
+  value: 0,
+  valueText: MISSING,
+  detail: MISSING,
+  tone: "neutral",
+});
+
+/** Session and Weekly always lead, in that order, as placeholders when absent; other windows follow only when reported. */
+const REQUIRED: ReadonlyArray<readonly [UsageWindow["key"], string]> = [
+  ["session", "Session"],
+  ["weekly", "Weekly"],
+];
+
+const fullMeters = (windows: readonly UsageWindow[], nowMs: number, detail: string | undefined): MeterNode[] => {
+  if (windows.length === 0) return [];
+  const required = REQUIRED.map(([key, label]) => {
+    const w = windows.find((x) => x.key === key);
+    return w ? meter(w, nowMs, detail) : missingMeter(label);
+  });
+  const extras = windows.filter((w) => !REQUIRED.some(([key]) => key === w.key)).map((w) => meter(w, nowMs, detail));
+  return [...required, ...extras];
+};
+
 /** How the account's state shows in the title row, per the design's state table. */
 const stateAccessory = (state: AccountState): Accessory | undefined => {
   switch (state.status) {
@@ -177,7 +205,7 @@ const fullGroup = (account: Account, nowMs: number): GroupNode => {
   const detail = staleDetail(account);
   return group(
     account,
-    state.windows.map((w) => meter(w, nowMs, detail)),
+    fullMeters(state.windows, nowMs, detail),
     subtitle,
     [
       ...leadingActions(account),

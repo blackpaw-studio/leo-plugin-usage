@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { fullRoot, sidebarRoot } from "../src/views";
+import { parseClaude } from "../src/parse/claude";
+import { parseCodex } from "../src/parse/codex";
 import type { Account } from "../src/poller";
-import { OFFLINE } from "../src/state";
+import { OFFLINE, initialState, reduce } from "../src/state";
 import type { GroupNode, MeterNode } from "../src/api";
 import type { Accessory } from "../sdk/leo";
 
@@ -210,5 +212,39 @@ describe("remote accounts", () => {
     const state = { status: "error", message: OFFLINE, windows: [] } as const;
     const long = remote({ state, handle: { id: "r", kind: "claude-code", label: "x", path: "~/.claude", machine: "M".repeat(120) } });
     for (const root of [fullRoot([long], NOW), sidebarRoot([long], NOW)]) expect(groups(root)[0].subtitle!.length).toBeLessThanOrEqual(120);
+  });
+});
+
+describe("fullRoot always shows Session then Weekly", () => {
+  const PLACEHOLDER = { value: 0, valueText: "—", detail: "—", tone: "neutral" };
+  const render = (kind: "claude-code" | "codex", body: unknown) => {
+    const windows = kind === "codex" ? parseCodex(body) : parseClaude(body);
+    const state = reduce(initialState(), { kind: "ok", windows }, NOW);
+    const handle = { id: "a1", kind, label: "x", path: "~/x" };
+    return meters(groups(fullRoot([{ handle, label: "x", state }], NOW))[0]);
+  };
+
+  it("keeps an empty Session row when the API omits five_hour", () => {
+    const rows = render("claude-code", { seven_day: { utilization: 30, resets_at: "2026-01-04T12:00:00Z" } });
+    expect(rows.map((r) => r.label)).toEqual(["Session", "Weekly"]);
+    expect(rows[0]).toMatchObject(PLACEHOLDER);
+    expect(rows[1].valueText).toBe("30%");
+  });
+
+  it("keeps an empty Weekly row when the API omits seven_day", () => {
+    const rows = render("claude-code", { five_hour: { utilization: null }, seven_day: null, seven_day_opus: { utilization: 5 } });
+    expect(rows.map((r) => r.label)).toEqual(["Session", "Weekly", "Weekly Opus"]);
+    expect(rows[1]).toMatchObject(PLACEHOLDER);
+  });
+
+  it("keeps an empty Weekly row for a Codex account with only a primary window", () => {
+    const rows = render("codex", { rate_limit: { primary_window: { used_percent: 12, reset_at: NOW / 1000 + 600 } } });
+    expect(rows.map((r) => r.label)).toEqual(["Session", "Weekly"]);
+    expect(rows[0].valueText).toBe("12%");
+    expect(rows[1]).toMatchObject(PLACEHOLDER);
+  });
+
+  it("shows no placeholder rows when there is no data at all", () => {
+    expect(meters(groups(fullRoot([account({ state: { status: "loading", windows: [] } })], NOW))[0])).toEqual([]);
   });
 });
