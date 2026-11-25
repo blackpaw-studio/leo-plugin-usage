@@ -1,7 +1,7 @@
 {
   "id": "studio.blackpaw.usage",
   "name": "Account Usage",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "apiVersion": 2,
   "main": "dist/main.js",
   "permissions": {
