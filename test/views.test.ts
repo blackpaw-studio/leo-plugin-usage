@@ -109,6 +109,15 @@ describe("sidebarRoot", () => {
     expect(meters(g)[0].detail).toBe("2h 14m"); // the reset time stays; the reason moves to the tooltip
   });
 
+  it("a stale window whose reset has passed reads \"reset\", so the old percentage doesn't look current", () => {
+    const passed = { ...session, resetsAtMs: NOW - 60_000 };
+    const [stale] = groups(sidebarRoot([account({ state: { status: "stale", message: "HTTP 500", windows: [passed, weekly] } })], NOW));
+    expect(meters(stale)[0].detail).toBe("reset");
+    expect(meters(stale)[1].detail).toBe("3d");
+    const [fresh] = groups(sidebarRoot([account({ state: { windows: [passed, weekly] } })], NOW));
+    expect(meters(fresh)[0].detail).toBe("now");
+  });
+
   it("the full view keeps the Stale accessory and the reason under the meters", () => {
     const [g] = groups(fullRoot([account({ state: { status: "stale", message: "HTTP 500" } })], NOW));
     expect(g.accessory).toMatchObject({ text: "Stale", color: "warning" });

@@ -60,7 +60,7 @@ const meter = (w: UsageWindow, nowMs: number, detail?: string): MeterNode => ({
 const MISSING = "—";
 
 /** Sidebar meter: short label, and the bare reset time as its detail when the window reports one. */
-const compactMeter = (w: UsageWindow | undefined, label: string, nowMs: number): MeterNode =>
+const compactMeter = (w: UsageWindow | undefined, label: string, nowMs: number, isStale: boolean): MeterNode =>
   w === undefined
     ? { type: "Meter", label, value: 0, valueText: MISSING, tone: "neutral" }
     : {
@@ -68,7 +68,7 @@ const compactMeter = (w: UsageWindow | undefined, label: string, nowMs: number):
         label,
         value: w.percent / 100,
         valueText: percentText(w.percent),
-        ...(w.resetsAtMs !== undefined ? { detail: resetsCompact(w.resetsAtMs, nowMs) } : {}),
+        ...(w.resetsAtMs !== undefined ? { detail: isStale && w.resetsAtMs <= nowMs ? "reset" : resetsCompact(w.resetsAtMs, nowMs) } : {}),
         tone: toneFor(w.percent),
       };
 
@@ -78,8 +78,9 @@ const SIDEBAR_WINDOWS: ReadonlyArray<readonly [UsageWindow["key"], string]> = [
 ];
 
 /** 5h then 7d, each an empty placeholder when absent. Empty while the account has no data at all. */
-const sidebarMeters = (windows: readonly UsageWindow[], nowMs: number): MeterNode[] =>
-  windows.length === 0 ? [] : SIDEBAR_WINDOWS.map(([key, label]) => compactMeter(windows.find((w) => w.key === key), label, nowMs));
+/** Stale values past their reset read "reset" rather than "now": the percentage is from before it. */
+const sidebarMeters = (windows: readonly UsageWindow[], nowMs: number, isStale: boolean): MeterNode[] =>
+  windows.length === 0 ? [] : SIDEBAR_WINDOWS.map(([key, label]) => compactMeter(windows.find((w) => w.key === key), label, nowMs, isStale));
 
 /** An empty bar for a window the provider didn't report: no invented 0%. */
 const missingMeter = (label: string): MeterNode => ({
@@ -231,7 +232,7 @@ const sidebarAccessory = (account: Account, nowMs: number): Accessory | undefine
 };
 
 const sidebarGroup = (account: Account, nowMs: number): GroupNode => {
-  const children = sidebarMeters(account.state.windows, nowMs);
+  const children = sidebarMeters(account.state.windows, nowMs, account.state.status === "stale");
   // Without meters the state explanation is the second line; with them the host hides the subtitle.
   const text = children.length === 0 ? stateText(account) : undefined;
   const subtitle = clip(text ?? KIND_NAME[account.handle.kind], MAX_LINE_CHARS);

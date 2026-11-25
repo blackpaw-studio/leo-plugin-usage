@@ -1,4 +1,4 @@
-// Vendored from blackpaw-studio/leoterm@8a1fc50b9 Packages/LeoKit/Sources/LeoKit/Plugins/Slots/LeoPluginSymbolAllowlist.swift — do not edit; re-vendor
+// Vendored from blackpaw-studio/leoterm@71018671a Packages/LeoKit/Sources/LeoKit/Plugins/Slots/LeoPluginSymbolAllowlist.swift — do not edit; re-vendor
 import Foundation
 
 /// The SF Symbols a row accessory may show. A plugin draws in the sidebar's
@@ -12,7 +12,7 @@ public enum LeoPluginSymbolAllowlist {
         "exclamationmark.circle", "exclamationmark.circle.fill", "exclamationmark.triangle", "exclamationmark.triangle.fill",
         "questionmark.circle", "info.circle", "minus.circle", "plus.circle", "circle", "circle.fill", "circle.dotted",
         // Progress and time
-        "clock", "clock.fill", "sparkle", "hourglass", "timer", "arrow.clockwise", "arrow.triangle.2.circlepath",
+        "clock", "clock.fill", "hourglass", "timer", "arrow.clockwise", "arrow.triangle.2.circlepath",
         "arrow.up", "arrow.down", "arrow.up.circle", "arrow.down.circle", "pause.circle", "play.circle", "stop.circle",
         "ellipsis", "ellipsis.circle",
         // Work and code
@@ -22,7 +22,7 @@ public enum LeoPluginSymbolAllowlist {
         // People and signals
         "bell", "bell.fill", "bubble.left", "bubble.left.fill", "text.bubble", "person", "person.2",
         "star", "star.fill", "heart", "bolt", "bolt.fill", "lock", "lock.fill", "key", "eye", "eye.slash",
-        "cloud", "network", "speedometer", "chart.bar",
+        "cloud", "network", "speedometer", "chart.bar", "sparkle",
     ]
 
     public static func isAllowed(_ name: String) -> Bool { names.contains(name) }

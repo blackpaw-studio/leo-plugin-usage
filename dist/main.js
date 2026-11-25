@@ -431,19 +431,19 @@
     tone: toneFor(w.percent)
   });
   var MISSING = "\u2014";
-  var compactMeter = (w, label, nowMs) => w === void 0 ? { type: "Meter", label, value: 0, valueText: MISSING, tone: "neutral" } : {
+  var compactMeter = (w, label, nowMs, isStale) => w === void 0 ? { type: "Meter", label, value: 0, valueText: MISSING, tone: "neutral" } : {
     type: "Meter",
     label,
     value: w.percent / 100,
     valueText: percentText(w.percent),
-    ...w.resetsAtMs !== void 0 ? { detail: resetsCompact(w.resetsAtMs, nowMs) } : {},
+    ...w.resetsAtMs !== void 0 ? { detail: isStale && w.resetsAtMs <= nowMs ? "reset" : resetsCompact(w.resetsAtMs, nowMs) } : {},
     tone: toneFor(w.percent)
   };
   var SIDEBAR_WINDOWS = [
     ["session", "5h"],
     ["weekly", "7d"]
   ];
-  var sidebarMeters = (windows, nowMs) => windows.length === 0 ? [] : SIDEBAR_WINDOWS.map(([key, label]) => compactMeter(windows.find((w) => w.key === key), label, nowMs));
+  var sidebarMeters = (windows, nowMs, isStale) => windows.length === 0 ? [] : SIDEBAR_WINDOWS.map(([key, label]) => compactMeter(windows.find((w) => w.key === key), label, nowMs, isStale));
   var missingMeter = (label) => ({
     type: "Meter",
     label,
@@ -554,7 +554,7 @@
     };
   };
   var sidebarGroup = (account, nowMs) => {
-    const children = sidebarMeters(account.state.windows, nowMs);
+    const children = sidebarMeters(account.state.windows, nowMs, account.state.status === "stale");
     const text = children.length === 0 ? stateText(account) : void 0;
     const subtitle = clip(text ?? KIND_NAME[account.handle.kind], MAX_LINE_CHARS);
     const actions = [...leadingActions(account), refreshAction(account), ...addActions, removeAction(account)];
