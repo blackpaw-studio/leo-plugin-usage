@@ -14,11 +14,19 @@
     "children": [
       {
         "type": "Meter",
-        "label": "Weekly Opus",
-        "value": 0.91,
-        "valueText": "91%",
+        "label": "Session",
+        "value": 0.42,
+        "valueText": "42%",
+        "detail": "Resets in 2h 14m",
+        "tone": "success"
+      },
+      {
+        "type": "Meter",
+        "label": "Weekly",
+        "value": 0.764,
+        "valueText": "76%",
         "detail": "Resets in 3d 4h",
-        "tone": "failure"
+        "tone": "warning"
       }
     ],
     "actions": [
@@ -72,6 +80,14 @@
         "value": 0.03,
         "valueText": "3%",
         "tone": "success"
+      },
+      {
+        "type": "Meter",
+        "label": "Weekly",
+        "value": 0,
+        "valueText": "—",
+        "detail": "—",
+        "tone": "neutral"
       }
     ],
     "actions": [
@@ -176,6 +192,14 @@
     "subtitle": "Codex",
     "sfSymbol": "terminal",
     "children": [
+      {
+        "type": "Meter",
+        "label": "Session",
+        "value": 0.42,
+        "valueText": "42%",
+        "detail": "Resets in 2h 14m",
+        "tone": "success"
+      },
       {
         "type": "Meter",
         "label": "Weekly",

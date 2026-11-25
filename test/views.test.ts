@@ -28,12 +28,24 @@ describe("sidebarRoot", () => {
     expect(JSON.stringify(root)).toContain("add");
   });
 
-  it("shows only the highest window per account as a toned Meter", () => {
+  it("shows a Session then a Weekly Meter per account, each toned", () => {
     const [g] = groups(sidebarRoot([account()], NOW));
     expect(g.title).toBe(".claude-work"); // views show Account.label verbatim; the poller owns the default
     expect(meters(g)).toEqual([
+      { type: "Meter", label: "Session", value: 0.42, valueText: "42%", detail: "Resets in 2h 14m", tone: "success" },
       { type: "Meter", label: "Weekly", value: 0.91, valueText: "91%", detail: "Resets in 3d", tone: "failure" },
     ]);
+  });
+
+  it("keeps Weekly as an empty placeholder when only Session is known, and leaves Opus/Sonnet out", () => {
+    const opus = { key: "weekly-opus", label: "Weekly Opus", percent: 5 } as const;
+    const [g] = groups(sidebarRoot([account({ state: { windows: [session, opus] } })], NOW));
+    expect(meters(g).map((m) => [m.label, m.valueText])).toEqual([["Session", "42%"], ["Weekly", "—"]]);
+  });
+
+  it("renders no meters for an account without data", () => {
+    const [g] = groups(sidebarRoot([account({ state: { status: "error", windows: [], message: "boom" } })], NOW));
+    expect(meters(g)).toEqual([]);
   });
 
   it("leads with a header accessory for the worst meter across accounts", () => {

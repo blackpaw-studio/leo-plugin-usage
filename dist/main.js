@@ -435,14 +435,13 @@
     ["session", "Session"],
     ["weekly", "Weekly"]
   ];
+  var requiredMeters = (windows, nowMs, detail) => windows.length === 0 ? [] : REQUIRED.map(([key, label]) => {
+    const w = windows.find((x) => x.key === key);
+    return w ? meter(w, nowMs, detail) : missingMeter(label);
+  });
   var fullMeters = (windows, nowMs, detail) => {
-    if (windows.length === 0) return [];
-    const required = REQUIRED.map(([key, label]) => {
-      const w = windows.find((x) => x.key === key);
-      return w ? meter(w, nowMs, detail) : missingMeter(label);
-    });
     const extras = windows.filter((w) => !REQUIRED.some(([key]) => key === w.key)).map((w) => meter(w, nowMs, detail));
-    return [...required, ...extras];
+    return [...requiredMeters(windows, nowMs, detail), ...extras];
   };
   var stateAccessory = (state) => {
     switch (state.status) {
@@ -525,8 +524,7 @@
     };
   };
   var sidebarGroup = (account, nowMs) => {
-    const top = highestWindow(account.state.windows);
-    const children = top ? [meter(top, nowMs, staleDetail(account))] : [];
+    const children = requiredMeters(account.state.windows, nowMs, staleDetail(account));
     const text = children.length === 0 ? stateText(account) : void 0;
     const kind = KIND_NAME[account.handle.kind];
     const subtitle = clip(text === void 0 ? kind : kind + " \xB7 " + text, MAX_LINE_CHARS);

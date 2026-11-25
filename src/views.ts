@@ -75,14 +75,18 @@ const REQUIRED: ReadonlyArray<readonly [UsageWindow["key"], string]> = [
   ["weekly", "Weekly"],
 ];
 
+/** Session then Weekly, each a placeholder when absent. Empty while the account has no data at all. */
+const requiredMeters = (windows: readonly UsageWindow[], nowMs: number, detail: string | undefined): MeterNode[] =>
+  windows.length === 0
+    ? []
+    : REQUIRED.map(([key, label]) => {
+        const w = windows.find((x) => x.key === key);
+        return w ? meter(w, nowMs, detail) : missingMeter(label);
+      });
+
 const fullMeters = (windows: readonly UsageWindow[], nowMs: number, detail: string | undefined): MeterNode[] => {
-  if (windows.length === 0) return [];
-  const required = REQUIRED.map(([key, label]) => {
-    const w = windows.find((x) => x.key === key);
-    return w ? meter(w, nowMs, detail) : missingMeter(label);
-  });
   const extras = windows.filter((w) => !REQUIRED.some(([key]) => key === w.key)).map((w) => meter(w, nowMs, detail));
-  return [...required, ...extras];
+  return [...requiredMeters(windows, nowMs, detail), ...extras];
 };
 
 /** How the account's state shows in the title row, per the design's state table. */
@@ -187,8 +191,7 @@ const group = (account: Account, children: GroupNode["children"], subtitle: stri
 };
 
 const sidebarGroup = (account: Account, nowMs: number): GroupNode => {
-  const top = highestWindow(account.state.windows);
-  const children = top ? [meter(top, nowMs, staleDetail(account))] : [];
+  const children = requiredMeters(account.state.windows, nowMs, staleDetail(account));
   // The kind is always the subtitle (VoiceOver reads title, subtitle, state). The host hides it while a
   // meter shows; without one, the state explanation follows the kind so it isn't lost.
   const text = children.length === 0 ? stateText(account) : undefined;
